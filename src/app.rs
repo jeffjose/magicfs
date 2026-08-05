@@ -17,7 +17,13 @@ use crate::view::{self, View};
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        None => root(cli.source, cli.spec, cli.out),
+        None => {
+            let view = root(cli.source, cli.spec, cli.out)?;
+            if cli.shell {
+                return enter_shell(&view);
+            }
+            Ok(())
+        }
         Some(Command::Sort { key, reverse }) => reconfigure(SpecArgs {
             sort: Some(key),
             reverse,
@@ -65,6 +71,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
+        Some(Command::Demo { count, out, shell }) => demo(count, out, shell),
         Some(Command::ShellInit { shell }) => {
             print!("{}", crate::shellinit::script(shell.as_deref())?);
             Ok(())
@@ -80,7 +87,7 @@ pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
 
 /// `magicfs [SOURCE] [OPTIONS]` — create a view, or reconfigure the one we're
 /// standing in.
-fn root(source: Option<PathBuf>, args: SpecArgs, out: Option<PathBuf>) -> Result<()> {
+fn root(source: Option<PathBuf>, args: SpecArgs, out: Option<PathBuf>) -> Result<PathBuf> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
     if source.is_none() && out.is_none()
@@ -115,7 +122,7 @@ fn root(source: Option<PathBuf>, args: SpecArgs, out: Option<PathBuf>) -> Result
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
-fn apply_to_view(mut view: View, args: SpecArgs) -> Result<()> {
+fn apply_to_view(mut view: View, args: SpecArgs) -> Result<PathBuf> {
     args.apply_to(&mut view.spec)?;
 
     let plan = build_plan(&view.source, &view.spec)?;
@@ -134,19 +141,44 @@ fn apply_to_view(mut view: View, args: SpecArgs) -> Result<()> {
 
     emit_cd(&view.root)?;
     println!("{}", view.root.display());
-    Ok(())
+    Ok(view.root)
 }
 
 /// Apply a spec mutation to the view containing the cwd.
 fn mutate(f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
     let mut view = current_view()?;
     f(&mut view.spec)?;
-    apply_to_view(view, SpecArgs::default())
+    apply_to_view(view, SpecArgs::default()).map(|_| ())
 }
 
 fn reconfigure(args: SpecArgs) -> Result<()> {
     let view = current_view()?;
-    apply_to_view(view, args)
+    apply_to_view(view, args).map(|_| ())
+}
+
+/// Replace this process with a shell rooted in the view.
+///
+/// The only way to *natively* put the user in the view: a process cannot
+/// change its parent's working directory, so instead of moving the calling
+/// shell we start a new one that is already there. Exiting it returns the user
+/// exactly where they were, because the original shell never moved.
+fn enter_shell(dir: &Path) -> Result<()> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+    if std::env::var_os("MAGICFS_SHELL").is_some() {
+        eprintln!("note: already in a magicfs shell — `exit` unwinds one level");
+    }
+    eprintln!("entering {} — `exit` to leave", dir.display());
+
+    std::env::set_current_dir(dir)
+        .with_context(|| format!("cannot enter {}", dir.display()))?;
+
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(&shell)
+        // Lets prompts advertise the view, and lets us spot nesting.
+        .env("MAGICFS_SHELL", dir)
+        .exec();
+    Err(err).with_context(|| format!("cannot start {shell}"))
 }
 
 fn current_view() -> Result<View> {
@@ -171,7 +203,7 @@ fn resolve_source(args: &SpecArgs) -> Result<(PathBuf, ViewSpec)> {
     }
 }
 
-fn report(view: &View) -> Result<()> {
+fn report(view: &View) -> Result<PathBuf> {
     let plan = build_plan(&view.source, &view.spec)?;
     eprintln!("view    {}", view.root.display());
     eprintln!("source  {}", view.source.display());
@@ -184,11 +216,11 @@ fn report(view: &View) -> Result<()> {
         eprintln!("last    {}", last.name);
     }
     println!("{}", view.root.display());
-    Ok(())
+    Ok(view.root.clone())
 }
 
 fn status() -> Result<()> {
-    report(&current_view()?)
+    report(&current_view()?).map(|_| ())
 }
 
 fn list() -> Result<()> {
@@ -285,6 +317,32 @@ fn paths(args: SpecArgs, print0: bool) -> Result<()> {
         out.write_all(if print0 { b"\0" } else { b"\n" })?;
     }
     out.flush()?;
+    Ok(())
+}
+
+/// `magicfs demo` — build a sample directory and suggest what to try in it.
+fn demo(count: usize, out: Option<PathBuf>, shell: bool) -> Result<()> {
+    if count == 0 {
+        bail!("--count must be at least 1");
+    }
+    let dir = crate::demo::create(out, count)?;
+
+    let spec = ViewSpec { dirs: crate::spec::DirMode::Exclude, ..Default::default() };
+    let files = build_plan(&dir, &spec)?;
+    eprintln!("created {} files in {}", files.len(), dir.display());
+    eprintln!();
+    eprintln!("  cd \"$(magicfs {} -s size)\"   # or add --shell", dir.display());
+    eprintln!("  ls                 # biggest first");
+    eprintln!("  magicfs shuffle    # `feh *` now opens in random order");
+    eprintln!("  magicfs sort natural");
+    eprintln!("  magicfs filter images");
+    eprintln!("  magicfs close      # removes the view, not the files");
+
+    if shell {
+        let view = root(Some(dir), SpecArgs::default(), None)?;
+        return enter_shell(&view);
+    }
+    println!("{}", dir.display());
     Ok(())
 }
 

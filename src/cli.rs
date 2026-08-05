@@ -41,6 +41,13 @@ pub struct Cli {
     /// Put the view here instead of under the runtime directory.
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
+
+    /// Start a shell inside the view. Exit it to return where you were.
+    ///
+    /// A process cannot change its parent's directory, so this is the only way
+    /// to land in the view without the `shell-init` wrapper.
+    #[arg(long)]
+    pub shell: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -95,6 +102,18 @@ pub enum Command {
     },
     /// Print the real path behind a view entry.
     Which { name: String },
+    /// Create a throwaway directory of sample files for trying magicfs out.
+    Demo {
+        /// How many files to create.
+        #[arg(short = 'n', long, default_value_t = 10)]
+        count: usize,
+        /// Where to put it (default: $TMPDIR/magicfs-demo).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Build a view of it and start a shell inside.
+        #[arg(long)]
+        shell: bool,
+    },
     /// Emit a shell wrapper that cds into views automatically.
     ShellInit {
         /// bash, zsh, fish, or tcsh. Guessed from $SHELL when omitted.

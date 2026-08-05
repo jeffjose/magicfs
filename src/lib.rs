@@ -14,6 +14,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod demo;
 pub mod entry;
 pub mod links;
 pub mod naming;

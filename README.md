@@ -89,6 +89,8 @@ only.
 | `magicfs paths [-0]` | Print the ordered real paths |
 | `magicfs which NAME` | Real path behind a view entry |
 | `magicfs shell-init SHELL` | Emit the auto-cd wrapper |
+| `magicfs DIR --shell` | Build the view and start a shell inside it |
+| `magicfs demo` | Create a throwaway directory of sample files |
 
 ### Options
 
@@ -103,17 +105,63 @@ Matching is case-insensitive by default, so `png` catches `.PNG`.
 `--recursive` flattens a whole tree into one ordered directory — useful for
 `~/photos/2024/**` scattered across subdirectories.
 
-## Shell integration
+## Trying it out
 
-Optional; it makes `magicfs` cd into the view for you.
+```console
+$ magicfs demo              # /tmp/magicfs-demo, 10 sample files
+$ magicfs demo --shell      # ...and drop straight into a view of it
+```
+
+The samples are real PNGs, so `feh *` actually opens them. Their names, sizes
+(0 – 900KB), and timestamps are deliberately scrambled against each other, so
+every ordering produces a visibly different result — which is the only way to
+tell a sort is doing anything:
+
+```
+name:     README.md alpha-canyon bravo-forest delta-river img10 img2 ...
+natural:  README.md alpha-canyon bravo-forest delta-river img2 img10 ...
+size:     zulu-sunset mike-beach-day yankee-night img2 delta-river ...
+time:     img10 alpha-canyon yankee-night notes.txt img2 delta-river ...
+```
+
+It includes `img2.png`/`img10.png` to show natural sort, a filename with
+spaces, an empty file, and two non-images so `magicfs filter images` has
+something to exclude. `-n 40` makes a bigger set; re-running replaces the
+directory, and it refuses to touch one it didn't create.
+
+## Getting into the view
+
+A process cannot change its parent's working directory — the cwd is per-process
+state inherited at `fork()`, and there is no syscall to reassign another
+process's. So `magicfs` cannot `cd` your shell, and neither can any other
+program. There are three ways around it.
+
+**1. Do it yourself.** Works everywhere, nothing to install:
+
+```sh
+cd "$(magicfs ~/photos -s time)"
+```
+
+**2. `--shell`** — start a *new* shell already inside the view. Nothing to
+install either; `exit` returns you, because your original shell never moved:
+
+```sh
+magicfs ~/photos -s time --shell
+```
+
+**3. The shell wrapper** — the usual approach, and what `zoxide`, `direnv`, and
+`autojump` all do. A function around the binary performs the `cd` on its
+behalf, so `magicfs` moves you with no nesting:
 
 ```sh
 # bash / zsh                             # tcsh
 magicfs shell-init bash >> ~/.bashrc     magicfs shell-init tcsh >> ~/.cshrc
 ```
 
-Then `magicfs ~/photos -s time` drops you straight into the view. Without it,
-use `cd "$(magicfs ~/photos -s time)"`.
+The wrapper passes a scratch-file path in `MAGICFS_CD_FILE`; magicfs writes the
+view path there and the shell reads it back and cds. Only view-creating
+commands write it — `list`, `paths`, `exec`, and `which` never move you, and
+`close` writes the *source* directory so you land somewhere that still exists.
 
 ## Notes
 
