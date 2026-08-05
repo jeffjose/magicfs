@@ -299,14 +299,9 @@ fn is_interactive() -> bool {
 fn enter_shell(dir: &Path) -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
-    // The destination is already on stdout; all that's left to say is how to
-    // get back — and that each nested shell costs one `exit`.
-    if std::env::var_os("MAGICFS_SHELL").is_some() {
-        eprintln!("(`exit` to return — one level per view you opened)");
-    } else {
-        eprintln!("(`exit` to return)");
-    }
-
+    // Nothing to announce: the listing above and the prompt below both already
+    // show where you are, and MAGICFS_SHELL is in the environment for a prompt
+    // that wants to say more.
     std::env::set_current_dir(dir)
         .with_context(|| format!("cannot enter {}", dir.display()))?;
 
