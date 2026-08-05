@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{Cli, Command, ShellPref, SpecArgs};
+use crate::cli::{Cli, Command, CdPref, SpecArgs};
 use crate::entry::scan;
 use crate::links;
 use crate::naming::{Named, render};
@@ -16,7 +16,7 @@ use crate::spec::{ViewSpec, fresh_seed};
 use crate::view::{self, View};
 
 pub fn run(cli: Cli) -> Result<()> {
-    let pref = cli.shell_pref();
+    let pref = cli.cd_pref();
     match cli.command {
         None => root(cli.source, cli.spec, cli.out, pref),
         Some(Command::Sort { key, reverse }) => reconfigure(
@@ -59,7 +59,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
-        Some(Command::Demo { count, out, open }) => demo(count, out, open, pref),
+        Some(Command::Demo { count, out }) => demo(count, out, pref),
         Some(Command::ShellInit { name }) => {
             print!("{}", crate::shellinit::script(name.as_deref())?);
             Ok(())
@@ -82,7 +82,7 @@ fn root(
     source: Option<PathBuf>,
     args: SpecArgs,
     out: Option<PathBuf>,
-    pref: ShellPref,
+    pref: CdPref,
 ) -> Result<()> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
@@ -91,15 +91,15 @@ fn root(
             let root = if args.is_empty() {
                 report(&view)?
             } else {
-                apply_to_view(view, args)?
+                apply_to_view(view, args, pref)?
             };
             // Already standing in it — only an explicit --shell nests another.
-            return maybe_enter(&root, pref, Standing::Inside);
+            return land(&root, pref, Standing::Inside);
         }
 
     let view = open_view(source, out)?;
-    let root = apply_to_view(view, args)?;
-    maybe_enter(&root, pref, Standing::Outside)
+    let root = apply_to_view(view, args, pref)?;
+    land(&root, pref, Standing::Outside)
 }
 
 /// Resolve a source directory to the view that presents it, creating the view
@@ -133,7 +133,7 @@ fn open_view(source: Option<PathBuf>, out: Option<PathBuf>) -> Result<View> {
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
-fn apply_to_view(mut view: View, args: SpecArgs) -> Result<PathBuf> {
+fn apply_to_view(mut view: View, args: SpecArgs, pref: CdPref) -> Result<PathBuf> {
     args.apply_to(&mut view.spec)?;
 
     let plan = build_plan(&view.source, &view.spec)?;
@@ -150,9 +150,21 @@ fn apply_to_view(mut view: View, args: SpecArgs) -> Result<PathBuf> {
         eprintln!("  (nothing matched — try `magicfs clear` to drop the filters)");
     }
 
-    emit_cd(&view.root)?;
-    println!("{}", view.root.display());
+    // The cd hint is emitted by `land`, not here, so `--no-cd` really does
+    // leave the shell alone.
+    print_path(&view.root, pref);
     Ok(view.root)
+}
+
+/// Put the resulting path on stdout, where that is what it is for.
+///
+/// At a terminal with the shell about to move there anyway, the path is one
+/// more line to read past — the prompt is about to show it. Captured, it is
+/// the entire point, so `$(magicfs .)` must always get it.
+fn print_path(path: &Path, pref: CdPref) {
+    if pref == CdPref::Never || !is_interactive() {
+        println!("{}", path.display());
+    }
 }
 
 /// Apply a spec mutation to the view containing the cwd — or, when we aren't
@@ -161,51 +173,64 @@ fn apply_to_view(mut view: View, args: SpecArgs) -> Result<PathBuf> {
 /// That fallback is what makes `cd ~/photos; magicfs shuffle; ls` the whole
 /// interaction: reordering a plain directory implies wanting a view of it, so
 /// there is nothing to set up first.
-fn mutate(pref: ShellPref, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
+fn mutate(pref: CdPref, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
     let (mut view, standing) = match view::current()? {
         Some(view) => (view, Standing::Inside),
         None => (open_view(None, None)?, Standing::Outside),
     };
     f(&mut view.spec)?;
-    let root = apply_to_view(view, SpecArgs::default())?;
-    maybe_enter(&root, pref, standing)
+    let root = apply_to_view(view, SpecArgs::default(), pref)?;
+    land(&root, pref, standing)
 }
 
-fn reconfigure(pref: ShellPref, args: SpecArgs) -> Result<()> {
+fn reconfigure(pref: CdPref, args: SpecArgs) -> Result<()> {
     let (view, standing) = match view::current()? {
         Some(view) => (view, Standing::Inside),
         None => (open_view(None, None)?, Standing::Outside),
     };
-    let root = apply_to_view(view, args)?;
-    maybe_enter(&root, pref, standing)
+    let root = apply_to_view(view, args, pref)?;
+    land(&root, pref, standing)
 }
 
-/// Whether the calling shell was already inside the view we just touched.
+/// Whether the calling shell is already standing in the directory we want it
+/// to end up in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Standing {
     Inside,
     Outside,
 }
 
-/// Put the user in the view, if that is both wanted and useful.
+/// Move the user to `dir`, if that is both wanted and possible.
 ///
 /// Three ways to land somewhere, in order of preference: the `shell-init`
 /// wrapper cds the real shell (so `cd -` goes back); failing that, at a
 /// terminal, a subshell (`exit` goes back); and when output is being captured,
 /// nothing at all — `$(magicfs .)` must stay a plain path on stdout.
-fn maybe_enter(root: &Path, pref: ShellPref, standing: Standing) -> Result<()> {
-    let enter = match pref {
-        ShellPref::Always => true,
-        ShellPref::Never => false,
+///
+/// Every command that produces a directory the user asked to be in routes
+/// through here, so they all behave the same way.
+fn land(dir: &Path, pref: CdPref, standing: Standing) -> Result<()> {
+    if pref == CdPref::Never {
+        return Ok(());
+    }
+    // Hand the path to the wrapper whether or not we also spawn a shell: it is
+    // the wrapper, not us, that decides to act on it.
+    if standing == Standing::Outside {
+        emit_cd(dir)?;
+    }
+
+    let subshell = match pref {
+        CdPref::Subshell => true,
+        CdPref::Never => unreachable!(),
         // Already there, or the wrapper is about to move us: a subshell would
         // only add a level to unwind.
-        ShellPref::Auto => {
+        CdPref::Auto => {
             standing == Standing::Outside
                 && std::env::var_os("MAGICFS_CD_FILE").is_none()
                 && is_interactive()
         }
     };
-    if enter { enter_shell(root, pref) } else { Ok(()) }
+    if subshell { enter_shell(dir) } else { Ok(()) }
 }
 
 /// True when both stdin and stdout are a terminal — i.e. a person is typing,
@@ -220,18 +245,15 @@ fn is_interactive() -> bool {
 /// change its parent's working directory, so instead of moving the calling
 /// shell we start a new one that is already there. Exiting it returns the user
 /// exactly where they were, because the original shell never moved.
-fn enter_shell(dir: &Path, pref: ShellPref) -> Result<()> {
+fn enter_shell(dir: &Path) -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let nested = std::env::var_os("MAGICFS_SHELL").is_some();
 
-    if nested {
-        eprintln!("note: already in a magicfs shell — `exit` unwinds one level");
-    }
-    eprintln!("entering {} — `exit` to leave", dir.display());
-    // Only nag the first time, and only when we chose the subshell ourselves:
-    // someone who typed --shell already knows what they asked for.
-    if pref == ShellPref::Auto && !nested && let Ok(name) = crate::shellinit::detect() {
-        eprintln!("(to cd in place instead, install the wrapper: magicfs shell-init {name})");
+    // The destination is already on stdout; all that's left to say is how to
+    // get back — and that each nested shell costs one `exit`.
+    if std::env::var_os("MAGICFS_SHELL").is_some() {
+        eprintln!("(`exit` to return — one level per view you opened)");
+    } else {
+        eprintln!("(`exit` to return)");
     }
 
     std::env::set_current_dir(dir)
@@ -415,12 +437,17 @@ fn paths(args: SpecArgs, print0: bool) -> Result<()> {
     Ok(())
 }
 
-/// `magicfs demo` — build a sample directory and suggest what to try in it.
+/// `magicfs demo` — build a sample directory, drop the user into it, and
+/// suggest what to try.
+///
+/// It lands you in the sample directory itself rather than a view of it: the
+/// point of the demo is to run magicfs *on* something and watch the order
+/// change, which needs a before as well as an after.
 ///
 /// The suggestions are deliberately free of shell-specific syntax: `$(...)` is
 /// a bash-ism that tcsh rejects outright, and a first-run hint that errors is
 /// worse than no hint at all.
-fn demo(count: usize, out: Option<PathBuf>, open: bool, pref: ShellPref) -> Result<()> {
+fn demo(count: usize, out: Option<PathBuf>, pref: CdPref) -> Result<()> {
     if count == 0 {
         bail!("--count must be at least 1");
     }
@@ -428,24 +455,14 @@ fn demo(count: usize, out: Option<PathBuf>, open: bool, pref: ShellPref) -> Resu
 
     let spec = ViewSpec { dirs: crate::spec::DirMode::Exclude, ..Default::default() };
     let files = build_plan(&dir, &spec)?;
-    eprintln!("created {} files in {}", files.len(), dir.display());
-    eprintln!();
-    eprintln!("  cd {}", dir.display());
-    eprintln!("  magicfs -s size      # opens a view, biggest first");
-    eprintln!("  ls");
-    eprintln!("  magicfs -s random    # `feh *` now opens in random order");
-    eprintln!("  magicfs -s natural");
-    eprintln!("  magicfs filter images");
-    eprintln!("  magicfs close        # removes the view, not the files");
+    eprintln!(
+        "created {} files in {} — try `magicfs -s size`, then `ls`",
+        files.len(),
+        dir.display()
+    );
 
-    // `demo --shell` reads as "put me in it", so treat it as `--open` too.
-    if open || pref == ShellPref::Always {
-        let view = open_view(Some(dir), None)?;
-        let root = apply_to_view(view, SpecArgs::default())?;
-        return maybe_enter(&root, pref, Standing::Outside);
-    }
-    println!("{}", dir.display());
-    Ok(())
+    print_path(&dir, pref);
+    land(&dir, pref, Standing::Outside)
 }
 
 fn which(name: &str) -> Result<()> {

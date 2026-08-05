@@ -13,15 +13,16 @@ The shell sorts glob results itself, so magicfs gives each file an index
 prefix (001-, 002-, ...) chosen so that alphabetical order *is* your order.
 
   cd ~/photos
-  magicfs shuffle                 puts you in a shuffled view of it
+  magicfs -s random               puts you in a shuffled view of it
   feh *                           opens in that order
-  magicfs sort time               reorder without leaving
+  magicfs -s time                 reorder without leaving
   magicfs filter png              restrict it to PNGs
   magicfs close                   back to the real directory
 
-At a terminal, a command that creates a view moves you into it — via the
+At a terminal, a command that lands somewhere moves you there — via the
 `shell-init` wrapper if you installed one, otherwise by starting a subshell
 you leave with `exit`. Redirected or in `$(...)`, it just prints the path.
+`--no-cd` (or MAGICFS_NO_CD=1) turns that off; `--shell` forces it.
 
 To keep the original filenames, skip the view and hand the tool an ordered
 argument list instead:
@@ -33,7 +34,7 @@ argument list instead:
 #[derive(Parser, Debug)]
 #[command(name = "magicfs", version, about = ABOUT, after_help = AFTER_HELP)]
 // Not `args_conflicts_with_subcommands`: that would reject the global
-// --shell/--no-shell flags when they appear before a subcommand.
+// --shell/--no-cd flags when they appear before a subcommand.
 #[command(subcommand_negates_reqs = true)]
 pub struct Cli {
     #[command(subcommand)]
@@ -49,37 +50,39 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
 
+    /// Stay put: build the view, print its path, and don't move the shell.
+    #[arg(long, global = true)]
+    pub no_cd: bool,
+
     /// Always start a shell inside the view, even when output is redirected.
     ///
     /// A process cannot change its parent's directory, so a subshell is the
     /// only way to land in the view without the `shell-init` wrapper. At a
     /// terminal this already happens by default; the flag forces it.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "no_cd")]
     pub shell: bool,
-
-    /// Never start a shell — just build the view and print its path.
-    #[arg(long, global = true, conflicts_with = "shell")]
-    pub no_shell: bool,
 }
 
-/// Whether a command that creates a view should also put the user inside it.
+/// Whether a command should move the user to the directory it produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShellPref {
-    /// Start a subshell only when it would actually help: at a terminal, with
-    /// no `shell-init` wrapper to do the `cd` for us.
+pub enum CdPref {
+    /// Move them by whatever means works: the `shell-init` wrapper if it is
+    /// installed, otherwise a subshell — but only at a terminal, so capturing
+    /// our stdout still just yields a path.
     Auto,
-    Always,
+    /// Force the subshell even when output is redirected.
+    Subshell,
     Never,
 }
 
 impl Cli {
-    pub fn shell_pref(&self) -> ShellPref {
+    pub fn cd_pref(&self) -> CdPref {
         if self.shell {
-            ShellPref::Always
-        } else if self.no_shell || std::env::var_os("MAGICFS_NO_SHELL").is_some() {
-            ShellPref::Never
+            CdPref::Subshell
+        } else if self.no_cd || std::env::var_os("MAGICFS_NO_CD").is_some() {
+            CdPref::Never
         } else {
-            ShellPref::Auto
+            CdPref::Auto
         }
     }
 }
@@ -142,9 +145,6 @@ pub enum Command {
         /// Where to put it (default: $TMPDIR/magicfs-demo).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Open a view of it straight away instead of just printing the path.
-        #[arg(long)]
-        open: bool,
     },
     /// Emit a shell wrapper that cds into views automatically.
     ShellInit {
@@ -382,9 +382,9 @@ mod tests {
 
     #[test]
     fn shell_flags_reach_subcommands_and_are_mutually_exclusive() {
-        let cli = Cli::try_parse_from(["magicfs", "--no-shell", "sort", "time"]).unwrap();
-        assert_eq!(cli.shell_pref(), ShellPref::Never);
-        assert!(Cli::try_parse_from(["magicfs", "--shell", "--no-shell"]).is_err());
+        let cli = Cli::try_parse_from(["magicfs", "--no-cd", "sort", "time"]).unwrap();
+        assert_eq!(cli.cd_pref(), CdPref::Never);
+        assert!(Cli::try_parse_from(["magicfs", "--shell", "--no-cd"]).is_err());
     }
 
     #[test]

@@ -325,3 +325,63 @@ fn the_shell_wrapper_receives_the_view_path() {
     assert_eq!(written, printed, "cd hint must match the printed path");
     assert!(Path::new(&written).is_dir());
 }
+
+/// Run with a `MAGICFS_CD_FILE` wrapper attached and report what, if anything,
+/// magicfs asked the shell to cd to.
+fn cd_hint(fx: &Fixture, args: &[&str], cwd: &Path, label: &str) -> Option<String> {
+    let hint = fx.dir.join(format!("hint-{label}.txt"));
+    let ok = Command::new(env!("CARGO_BIN_EXE_magicfs"))
+        .args(args)
+        .current_dir(cwd)
+        .env("MAGICFS_DIR", &fx.base)
+        .env("MAGICFS_REGISTRY", &fx.registry)
+        .env("MAGICFS_CD_FILE", &hint)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "magicfs {args:?} failed");
+    std::fs::read_to_string(&hint).ok().filter(|s| !s.is_empty())
+}
+
+#[test]
+fn demo_lands_you_in_the_directory_it_creates() {
+    // Otherwise the first thing the demo asks of you is a manual cd.
+    let fx = Fixture::new("demo-cd");
+    let target = fx.dir.join("demo");
+    let args = ["demo", "--out", target.to_str().unwrap()];
+    assert_eq!(
+        cd_hint(&fx, &args, &fx.dir, "demo").as_deref(),
+        Some(target.to_str().unwrap()),
+        "demo should hand the shell its sample directory"
+    );
+}
+
+#[test]
+fn no_cd_leaves_the_shell_alone() {
+    let fx = chronological_fixture("no-cd");
+    assert!(
+        cd_hint(&fx, &["-s", "time"], &fx.source, "on").is_some(),
+        "sanity: a view command normally moves you"
+    );
+    assert_eq!(
+        cd_hint(&fx, &["--no-cd", "-s", "size"], &fx.source, "off"),
+        None,
+        "--no-cd must suppress the cd entirely"
+    );
+}
+
+#[test]
+fn read_only_commands_never_move_you() {
+    // `paths`/`exec`/`list` answer a question; moving the shell would be a
+    // side effect nobody asked for.
+    let fx = chronological_fixture("no-move");
+    fx.run(&["-s", "time"], &fx.source);
+    for (args, label) in [
+        (vec!["paths"], "paths"),
+        (vec!["exec", "--dry-run", "echo"], "exec"),
+        (vec!["list"], "list"),
+    ] {
+        assert_eq!(cd_hint(&fx, &args, &fx.source, label), None, "{label} moved the shell");
+    }
+}

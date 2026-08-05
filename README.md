@@ -14,7 +14,7 @@ $ magicfs close                  # back to ~/photos, real names
 ```
 
 There is nothing to install or configure first: `magicfs` on a plain directory
-opens a view of it *and* moves you there. See
+opens a view of it *and* moves you there. `--no-cd` opts out. See
 [Getting into the view](#getting-into-the-view) for how, and how to get back.
 
 ## Why the filenames change
@@ -106,7 +106,7 @@ presents — which is where you are after leaving one.
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
-`--case-sensitive` `--out` `--shell` `--no-shell`
+`--case-sensitive` `--out` `--no-cd` `--shell`
 
 Filter patterns accept a bare extension (`png`), a class (`images`, `raw`,
 `video`, `audio`, `docs`, `archives`), or a glob (`'IMG_*'`, `'2024/*'`).
@@ -118,8 +118,7 @@ Matching is case-insensitive by default, so `png` catches `.PNG`.
 ## Trying it out
 
 ```console
-$ magicfs demo              # /tmp/magicfs-demo, 10 sample files
-$ magicfs demo --open       # ...and drop straight into a view of it
+$ magicfs demo              # 10 sample files in /tmp/magicfs-demo — and cds you there
 ```
 
 The samples are real PNGs, so `feh *` actually opens them. Their names, sizes
@@ -165,7 +164,9 @@ commands write it — `list`, `paths`, `exec`, and `which` never move you, and
 
 **2. A subshell**, when there's no wrapper and you're at a terminal. magicfs
 starts a *new* shell already inside the view; `exit` returns you, because your
-original shell never moved. This is the default, so nothing needs installing.
+original shell never moved. This is the default, so nothing needs installing —
+the cost is that each view you open this way is one more `exit` to unwind,
+which is the reason to install the wrapper.
 
 **3. Nothing at all**, when stdout isn't a terminal — so command substitution
 still behaves, and scripts get a plain path and no surprise subshell:
@@ -175,8 +176,8 @@ cd "$(magicfs ~/photos -s time)"     # bash/zsh
 cd `magicfs ~/photos -s time`        # tcsh
 ```
 
-`--shell` forces the subshell even when output is redirected; `--no-shell` (or
-`MAGICFS_NO_SHELL=1`) suppresses it and just prints the path.
+`--no-cd` (or `MAGICFS_NO_CD=1`) turns the move off everywhere and just prints
+the path; `--shell` forces the subshell even when output is redirected.
 
 Closing the view you're standing in is the one case that can't be tidy: with a
 wrapper you're returned to the source directory, and without one magicfs leaves
