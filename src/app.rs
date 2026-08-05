@@ -17,25 +17,27 @@ use crate::view::{self, View};
 
 pub fn run(cli: Cli) -> Result<()> {
     let pref = cli.cd_pref();
+    let new = cli.new;
     match cli.command {
-        None => root(cli.source, cli.spec, cli.out, pref),
+        None => root(cli.source, cli.spec, cli.out, pref, new),
         Some(Command::Sort { key, reverse }) => reconfigure(
             pref,
+            new,
             SpecArgs { sort: Some(key), reverse, ..Default::default() },
         ),
-        Some(Command::Reverse) => mutate(pref, |spec| {
+        Some(Command::Reverse) => mutate(pref, new, |spec| {
             spec.reverse = !spec.reverse;
             Ok(())
         }),
-        Some(Command::Filter { patterns }) => mutate(pref, move |spec| {
+        Some(Command::Filter { patterns }) => mutate(pref, new, move |spec| {
             spec.filter = patterns.clone();
             Ok(())
         }),
-        Some(Command::Exclude { patterns }) => mutate(pref, move |spec| {
+        Some(Command::Exclude { patterns }) => mutate(pref, new, move |spec| {
             spec.exclude = patterns.clone();
             Ok(())
         }),
-        Some(Command::Limit { n }) => mutate(pref, move |spec| {
+        Some(Command::Limit { n }) => mutate(pref, new, move |spec| {
             spec.limit = match n.as_str() {
                 "none" | "off" | "all" | "0" => None,
                 other => Some(
@@ -46,13 +48,13 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             Ok(())
         }),
-        Some(Command::Clear) => mutate(pref, |spec| {
+        Some(Command::Clear) => mutate(pref, new, |spec| {
             spec.filter.clear();
             spec.exclude.clear();
             spec.limit = None;
             Ok(())
         }),
-        Some(Command::Refresh) => mutate(pref, |_| Ok(())),
+        Some(Command::Refresh) => mutate(pref, new, |_| Ok(())),
         Some(Command::Status) => status(),
         Some(Command::List) => list(),
         Some(Command::Close { all }) => close(all),
@@ -84,10 +86,11 @@ fn root(
     args: SpecArgs,
     out: Option<PathBuf>,
     pref: CdPref,
+    new: bool,
 ) -> Result<()> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
-    if source.is_none() && out.is_none()
+    if source.is_none() && out.is_none() && !new
         && let Some(view) = view::current()? {
             let root = if args.is_empty() {
                 report(&view)?
@@ -98,9 +101,24 @@ fn root(
             return land(&root, pref, Standing::Inside);
         }
 
-    let view = open_view(source, out)?;
+    let view = match (source, view::current()?) {
+        (Some(source), _) => open_view(Some(source), out)?,
+        // `--new` from inside a view: another view of what *it* presents, not
+        // of the view directory itself.
+        (None, Some(current)) => sibling_of(&current)?,
+        (None, None) => open_view(None, out)?,
+    };
     let root = apply_to_view(view, args, pref)?;
     land(&root, pref, Standing::Outside)
+}
+
+/// A second, independent view of the same directory, starting from the same
+/// ordering — so `--new` compares two variations rather than resetting to
+/// defaults and losing the filters you had set up.
+fn sibling_of(view: &View) -> Result<View> {
+    let mut fresh = open_view(Some(view.source.clone()), None)?;
+    fresh.spec = view.spec.clone();
+    Ok(fresh)
 }
 
 /// Resolve a source directory to the view that presents it, creating the view
@@ -174,23 +192,27 @@ fn print_path(path: &Path, pref: CdPref) {
 /// That fallback is what makes `cd ~/photos; magicfs shuffle; ls` the whole
 /// interaction: reordering a plain directory implies wanting a view of it, so
 /// there is nothing to set up first.
-fn mutate(pref: CdPref, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
-    let (mut view, standing) = match view::current()? {
-        Some(view) => (view, Standing::Inside),
-        None => (open_view(None, None)?, Standing::Outside),
-    };
+fn mutate(pref: CdPref, new: bool, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
+    let (mut view, standing) = target_view(new)?;
     f(&mut view.spec)?;
     let root = apply_to_view(view, SpecArgs::default(), pref)?;
     land(&root, pref, standing)
 }
 
-fn reconfigure(pref: CdPref, args: SpecArgs) -> Result<()> {
-    let (view, standing) = match view::current()? {
-        Some(view) => (view, Standing::Inside),
-        None => (open_view(None, None)?, Standing::Outside),
-    };
+fn reconfigure(pref: CdPref, new: bool, args: SpecArgs) -> Result<()> {
+    let (view, standing) = target_view(new)?;
     let root = apply_to_view(view, args, pref)?;
     land(&root, pref, standing)
+}
+
+/// The view a reordering command should act on, and whether the shell is
+/// already standing in it.
+fn target_view(new: bool) -> Result<(View, Standing)> {
+    match view::current()? {
+        Some(view) if !new => Ok((view, Standing::Inside)),
+        Some(view) => Ok((sibling_of(&view)?, Standing::Outside)),
+        None => Ok((open_view(None, None)?, Standing::Outside)),
+    }
 }
 
 /// Whether the calling shell is already standing in the directory we want it
@@ -246,15 +268,14 @@ fn land(dir: &Path, pref: CdPref, standing: Standing) -> Result<()> {
 /// `[size desc]`.
 const DEFAULT_LS: &str = "ls -lhL --color=auto";
 
-/// Past this many entries a listing is a wall of text rather than an answer,
-/// so leave it to the user to ask for one.
-const LISTING_LIMIT: usize = 100;
-
 /// Show the contents of the directory we landed in.
 ///
 /// The result *is* the answer to `magicfs -s size` — making the user type `ls`
-/// to see it wastes the round trip. Skipped when output is captured, since
-/// then this is a path-producing tool and nothing more.
+/// to see it wastes the round trip. Long listings are not truncated: a
+/// directory of 5,000 photos scrolls, exactly as `ls` would, and the terminal's
+/// scrollback is a better place to solve that than a guess about what counts as
+/// too many. Skipped when output is captured, since then this is a
+/// path-producing tool and nothing more.
 fn show_listing(dir: &Path) {
     if !is_interactive() {
         return;
@@ -263,18 +284,6 @@ fn show_listing(dir: &Path) {
     let mut words = cmd.split_whitespace();
     // `MAGICFS_LS=` is how you turn this off.
     let Some(program) = words.next() else { return };
-
-    let visible = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| !e.file_name().as_encoded_bytes().starts_with(b"."))
-                .count()
-        })
-        .unwrap_or(0);
-    if visible > LISTING_LIMIT {
-        eprintln!("({visible} entries — listing skipped)");
-        return;
-    }
 
     // Failure here is cosmetic: a missing `ls` must not fail the reorder that
     // actually did the work.

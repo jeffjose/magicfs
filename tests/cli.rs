@@ -313,6 +313,38 @@ fn a_second_terminal_gets_its_own_view() {
 }
 
 #[test]
+fn new_opens_a_second_view_to_compare_against() {
+    let fx = Fixture::new("new-view");
+    for i in 0..30 {
+        fx.photo(&format!("f{i:02}.jpg"), "2024-01-01");
+    }
+    let (first, _, _) = fx.run(&["-s", "random"], &fx.source);
+    let first = PathBuf::from(first);
+    let a = fx.glob(&first);
+
+    // From inside the first view, --new builds a sibling instead of re-rolling
+    // the one you are standing in.
+    let (second, stderr, ok) = fx.run(&["-s", "random", "--new"], &first);
+    assert!(ok, "got: {stderr}");
+    let second = PathBuf::from(second);
+
+    assert_ne!(first, second, "--new must not reuse the current view");
+    assert_eq!(fx.glob(&first), a, "the original shuffle must survive");
+    assert_ne!(fx.glob(&second), a, "the second view should be a fresh shuffle");
+}
+
+#[test]
+fn new_inherits_the_filters_of_the_view_it_forks_from() {
+    // Comparing two shuffles of "the PNGs" shouldn't silently widen to
+    // everything.
+    let fx = chronological_fixture("new-inherit");
+    let (view, _, _) = fx.run(&["-s", "random", "-f", "png"], &fx.source);
+    let (second, stderr, ok) = fx.run(&["-s", "random", "--new"], Path::new(&view));
+    assert!(ok, "got: {stderr}");
+    assert_eq!(fx.glob(Path::new(&second)).len(), 2, "should still be PNG-only");
+}
+
+#[test]
 fn clean_needs_confirmation_and_then_removes_everything() {
     let fx = chronological_fixture("clean");
     let (a, _, _) = fx.run(&["-s", "time"], &fx.source);

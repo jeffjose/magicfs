@@ -50,6 +50,13 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
 
+    /// Open a second view instead of reconfiguring the one you're in.
+    ///
+    /// Useful for holding two orderings of the same directory at once —
+    /// `magicfs -s random --new` twice gives you two shuffles to compare.
+    #[arg(long, global = true)]
+    pub new: bool,
+
     /// Stay put: build the view, print its path, and don't move the shell.
     #[arg(long, global = true)]
     pub no_cd: bool,

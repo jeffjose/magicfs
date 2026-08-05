@@ -76,8 +76,19 @@ actually moved (20,000 files: ~70ms to build, ~150ms to reshuffle).
 `photos-4dk` and `photos-q7f`, and an id is never handed out twice. Reuse would
 mean a second terminal silently reordering the directory the first one is
 standing in, and two unrelated directories that happen to share a basename
-would fight over the same name. Once you *are* in a view, commands reconfigure
-it in place, so your shell is never left in an abandoned directory.
+would fight over the same name.
+
+Once you *are* in a view, commands reconfigure it in place — unless you pass
+`--new`, which forks a second view off the current one instead. That is how you
+hold two orderings of the same directory at once:
+
+```console
+$ magicfs -s random             # one shuffle
+$ magicfs -s random --new       # a second, to compare against — the first is untouched
+```
+
+The fork inherits the ordering and filters it came from, so comparing two
+shuffles of "the PNGs" stays PNG-only.
 
 Views cost nothing but symlinks, so let them pile up and run `magicfs clean`
 when you want the space back in `magicfs list`.
@@ -118,7 +129,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
-`--case-sensitive` `--out` `--no-cd` `--shell`
+`--case-sensitive` `--out` `--new` `--no-cd` `--shell`
 
 Filter patterns accept a bare extension (`png`), a class (`images`, `raw`,
 `video`, `audio`, `docs`, `archives`), or a glob (`'IMG_*'`, `'2024/*'`).
@@ -194,8 +205,8 @@ the path; `--shell` forces the subshell even when output is redirected.
 After landing, magicfs lists the directory for you — the resulting order *is*
 the answer, and making you type `ls` to see it wastes the round trip. Set
 `MAGICFS_LS` to change the command (`MAGICFS_LS='eza -l'`) or to an empty
-string to turn it off; it is skipped past 100 entries, and whenever output is
-captured.
+string to turn it off. Long listings scroll rather than being truncated, the
+same as `ls`. Skipped whenever output is captured.
 
 Closing the view you're standing in is the one case that can't be tidy: with a
 wrapper you're returned to the source directory, and without one magicfs leaves
