@@ -117,12 +117,21 @@ fn read_existing(root: &Path) -> Result<HashMap<String, PathBuf>> {
 
 /// Tear the view directory down: every symlink, the state file, then the
 /// directory itself. Real files are never removed — only links to them.
-pub fn close(view: &View) -> Result<()> {
+/// Tear a view down, removing links only — never anything in the source.
+///
+/// `keep_dir` leaves the emptied root directory behind. That matters when the
+/// caller's shell is standing in it: deleting the cwd out from under a shell
+/// makes every subsequent command fail on `getcwd`, which looks far more
+/// broken than an empty directory that the next view will reuse.
+pub fn close(view: &View, keep_dir: bool) -> Result<()> {
     let existing = read_existing(&view.root)?;
     for name in existing.keys() {
         let _ = std::fs::remove_file(view.root.join(name));
     }
     let _ = std::fs::remove_file(view.root.join(STATE_FILE));
+    if keep_dir {
+        return Ok(());
+    }
     std::fs::remove_dir(&view.root)
         .with_context(|| format!("removing view directory {}", view.root.display()))?;
     Ok(())
@@ -258,8 +267,24 @@ mod tests {
         view.save().unwrap();
         assert!(root.exists());
 
-        close(&view).unwrap();
+        close(&view, false).unwrap();
         assert!(!root.exists(), "view directory should be gone");
+        assert_eq!(std::fs::read(src.path().join("keep.jpg")).unwrap(), b"precious");
+    }
+
+    #[test]
+    fn close_can_keep_an_emptied_root_for_a_shell_standing_in_it() {
+        let src = TempDir::new("sym-keep-src");
+        src.write("keep.jpg", b"precious");
+        let out = TempDir::new("sym-keep-out");
+        let root = out.path().join("v");
+
+        let (view, _) = build(&root, src.path(), &ViewSpec { dirs: DirMode::Exclude, ..Default::default() }).unwrap();
+        view.save().unwrap();
+
+        close(&view, true).unwrap();
+        assert!(root.is_dir(), "root must survive so getcwd keeps working");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "but be empty");
         assert_eq!(std::fs::read(src.path().join("keep.jpg")).unwrap(), b"precious");
     }
 

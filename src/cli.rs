@@ -12,11 +12,16 @@ const AFTER_HELP: &str = "\
 The shell sorts glob results itself, so magicfs gives each file an index
 prefix (001-, 002-, ...) chosen so that alphabetical order *is* your order.
 
-  magicfs ~/photos -s time        build a newest-first view and print its path
-  cd \"$(magicfs ~/photos -s time)\"
-  magicfs shuffle                 reshuffle the view you are standing in
+  cd ~/photos
+  magicfs shuffle                 puts you in a shuffled view of it
+  feh *                           opens in that order
+  magicfs sort time               reorder without leaving
   magicfs filter png              restrict it to PNGs
-  feh *                           opens in the view's order
+  magicfs close                   back to the real directory
+
+At a terminal, a command that creates a view moves you into it — via the
+`shell-init` wrapper if you installed one, otherwise by starting a subshell
+you leave with `exit`. Redirected or in `$(...)`, it just prints the path.
 
 To keep the original filenames, skip the view and hand the tool an ordered
 argument list instead:
@@ -27,7 +32,9 @@ argument list instead:
 
 #[derive(Parser, Debug)]
 #[command(name = "magicfs", version, about = ABOUT, after_help = AFTER_HELP)]
-#[command(args_conflicts_with_subcommands = true)]
+// Not `args_conflicts_with_subcommands`: that would reject the global
+// --shell/--no-shell flags when they appear before a subcommand.
+#[command(subcommand_negates_reqs = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -42,12 +49,39 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
 
-    /// Start a shell inside the view. Exit it to return where you were.
+    /// Always start a shell inside the view, even when output is redirected.
     ///
-    /// A process cannot change its parent's directory, so this is the only way
-    /// to land in the view without the `shell-init` wrapper.
-    #[arg(long)]
+    /// A process cannot change its parent's directory, so a subshell is the
+    /// only way to land in the view without the `shell-init` wrapper. At a
+    /// terminal this already happens by default; the flag forces it.
+    #[arg(long, global = true)]
     pub shell: bool,
+
+    /// Never start a shell — just build the view and print its path.
+    #[arg(long, global = true, conflicts_with = "shell")]
+    pub no_shell: bool,
+}
+
+/// Whether a command that creates a view should also put the user inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellPref {
+    /// Start a subshell only when it would actually help: at a terminal, with
+    /// no `shell-init` wrapper to do the `cd` for us.
+    Auto,
+    Always,
+    Never,
+}
+
+impl Cli {
+    pub fn shell_pref(&self) -> ShellPref {
+        if self.shell {
+            ShellPref::Always
+        } else if self.no_shell || std::env::var_os("MAGICFS_NO_SHELL").is_some() {
+            ShellPref::Never
+        } else {
+            ShellPref::Auto
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -58,8 +92,6 @@ pub enum Command {
         #[arg(short, long)]
         reverse: bool,
     },
-    /// Re-roll the random order of the current view.
-    Shuffle,
     /// Flip the current view's order.
     Reverse,
     /// Restrict the view (e.g. `png`, `images`, `'IMG_*'`). No arguments clears it.
@@ -110,14 +142,16 @@ pub enum Command {
         /// Where to put it (default: $TMPDIR/magicfs-demo).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Build a view of it and start a shell inside.
+        /// Open a view of it straight away instead of just printing the path.
         #[arg(long)]
-        shell: bool,
+        open: bool,
     },
     /// Emit a shell wrapper that cds into views automatically.
     ShellInit {
         /// bash, zsh, fish, or tcsh. Guessed from $SHELL when omitted.
-        shell: Option<String>,
+        // Not `shell`: that id belongs to the global --shell flag.
+        #[arg(value_name = "SHELL")]
+        name: Option<String>,
     },
 }
 
@@ -191,7 +225,11 @@ impl SpecArgs {
             // A fresh `--sort` also resets direction, so switching sort keys
             // doesn't silently inherit a reverse from a previous command.
             spec.reverse = self.reverse;
-            if key == SortKey::Random && spec.sort != SortKey::Random {
+            // Asking for random again means "shuffle again" — that is the only
+            // thing a second `-s random` could usefully mean. Everything else
+            // that rebuilds a view (`refresh`, `filter`, ...) keeps the seed,
+            // so an existing shuffle survives adding a file to the directory.
+            if key == SortKey::Random {
                 spec.seed = fresh_seed();
             }
             spec.sort = key;
@@ -239,6 +277,14 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    /// Catches clashes clap only discovers at runtime — notably a global flag
+    /// and a subcommand argument sharing an id, which panics mid-parse.
+    #[test]
+    fn command_definition_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
     #[test]
     fn root_command_takes_a_source_and_options() {
         let cli = Cli::try_parse_from(["magicfs", "/photos", "-s", "time", "-f", "png"]).unwrap();
@@ -250,8 +296,8 @@ mod tests {
 
     #[test]
     fn subcommands_win_over_the_positional_source() {
-        let cli = Cli::try_parse_from(["magicfs", "shuffle"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Shuffle)));
+        let cli = Cli::try_parse_from(["magicfs", "reverse"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Reverse)));
         assert_eq!(cli.source, None);
     }
 
@@ -307,14 +353,38 @@ mod tests {
     }
 
     #[test]
-    fn re_applying_random_keeps_the_existing_seed() {
-        // `magicfs sort random` twice should not silently reshuffle; only
-        // `magicfs shuffle` re-rolls.
+    fn re_applying_random_reshuffles() {
+        // There is no `shuffle` subcommand: a second `-s random` is the reshuffle.
         let mut spec = ViewSpec { sort: SortKey::Random, seed: 99, ..Default::default() };
         SpecArgs { sort: Some("random".into()), ..Default::default() }
             .apply_to(&mut spec)
             .unwrap();
+        assert_ne!(spec.seed, 99, "a repeated `-s random` should re-roll");
+    }
+
+    #[test]
+    fn rebuilding_without_a_sort_key_preserves_the_shuffle() {
+        // `magicfs filter png` on a shuffled view must not scramble it.
+        let mut spec = ViewSpec { sort: SortKey::Random, seed: 99, ..Default::default() };
+        SpecArgs { filter: vec!["png".into()], ..Default::default() }
+            .apply_to(&mut spec)
+            .unwrap();
         assert_eq!(spec.seed, 99);
+    }
+
+    #[test]
+    fn source_is_optional_so_cwd_is_implied() {
+        let cli = Cli::try_parse_from(["magicfs", "--sort=random"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.source, None);
+        assert_eq!(cli.spec.sort.as_deref(), Some("random"));
+    }
+
+    #[test]
+    fn shell_flags_reach_subcommands_and_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["magicfs", "--no-shell", "sort", "time"]).unwrap();
+        assert_eq!(cli.shell_pref(), ShellPref::Never);
+        assert!(Cli::try_parse_from(["magicfs", "--shell", "--no-shell"]).is_err());
     }
 
     #[test]

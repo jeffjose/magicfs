@@ -7,47 +7,35 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{Cli, Command, SpecArgs};
+use crate::cli::{Cli, Command, ShellPref, SpecArgs};
 use crate::entry::scan;
 use crate::links;
 use crate::naming::{Named, render};
 use crate::order::arrange;
-use crate::spec::{SortKey, ViewSpec, fresh_seed};
+use crate::spec::{ViewSpec, fresh_seed};
 use crate::view::{self, View};
 
 pub fn run(cli: Cli) -> Result<()> {
+    let pref = cli.shell_pref();
     match cli.command {
-        None => {
-            let view = root(cli.source, cli.spec, cli.out)?;
-            if cli.shell {
-                return enter_shell(&view);
-            }
-            Ok(())
-        }
-        Some(Command::Sort { key, reverse }) => reconfigure(SpecArgs {
-            sort: Some(key),
-            reverse,
-            ..Default::default()
-        }),
-        Some(Command::Shuffle) => mutate(|spec| {
-            spec.sort = SortKey::Random;
-            spec.reverse = false;
-            spec.seed = fresh_seed();
-            Ok(())
-        }),
-        Some(Command::Reverse) => mutate(|spec| {
+        None => root(cli.source, cli.spec, cli.out, pref),
+        Some(Command::Sort { key, reverse }) => reconfigure(
+            pref,
+            SpecArgs { sort: Some(key), reverse, ..Default::default() },
+        ),
+        Some(Command::Reverse) => mutate(pref, |spec| {
             spec.reverse = !spec.reverse;
             Ok(())
         }),
-        Some(Command::Filter { patterns }) => mutate(move |spec| {
+        Some(Command::Filter { patterns }) => mutate(pref, move |spec| {
             spec.filter = patterns.clone();
             Ok(())
         }),
-        Some(Command::Exclude { patterns }) => mutate(move |spec| {
+        Some(Command::Exclude { patterns }) => mutate(pref, move |spec| {
             spec.exclude = patterns.clone();
             Ok(())
         }),
-        Some(Command::Limit { n }) => mutate(move |spec| {
+        Some(Command::Limit { n }) => mutate(pref, move |spec| {
             spec.limit = match n.as_str() {
                 "none" | "off" | "all" | "0" => None,
                 other => Some(
@@ -58,22 +46,22 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             Ok(())
         }),
-        Some(Command::Clear) => mutate(|spec| {
+        Some(Command::Clear) => mutate(pref, |spec| {
             spec.filter.clear();
             spec.exclude.clear();
             spec.limit = None;
             Ok(())
         }),
-        Some(Command::Refresh) => mutate(|_| Ok(())),
+        Some(Command::Refresh) => mutate(pref, |_| Ok(())),
         Some(Command::Status) => status(),
         Some(Command::List) => list(),
         Some(Command::Close { all }) => close(all),
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
-        Some(Command::Demo { count, out, shell }) => demo(count, out, shell),
-        Some(Command::ShellInit { shell }) => {
-            print!("{}", crate::shellinit::script(shell.as_deref())?);
+        Some(Command::Demo { count, out, open }) => demo(count, out, open, pref),
+        Some(Command::ShellInit { name }) => {
+            print!("{}", crate::shellinit::script(name.as_deref())?);
             Ok(())
         }
     }
@@ -87,38 +75,61 @@ pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
 
 /// `magicfs [SOURCE] [OPTIONS]` — create a view, or reconfigure the one we're
 /// standing in.
-fn root(source: Option<PathBuf>, args: SpecArgs, out: Option<PathBuf>) -> Result<PathBuf> {
+///
+/// `SOURCE` defaults to the current directory, so `magicfs -s random` needs no
+/// `.`; and with no options at all it just reports on the view you're in.
+fn root(
+    source: Option<PathBuf>,
+    args: SpecArgs,
+    out: Option<PathBuf>,
+    pref: ShellPref,
+) -> Result<()> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
     if source.is_none() && out.is_none()
         && let Some(view) = view::current()? {
-            return if args.is_empty() {
-                report(&view)
+            let root = if args.is_empty() {
+                report(&view)?
             } else {
-                apply_to_view(view, args)
+                apply_to_view(view, args)?
             };
+            // Already standing in it — only an explicit --shell nests another.
+            return maybe_enter(&root, pref, Standing::Inside);
         }
 
-    let source = source.unwrap_or(std::env::current_dir()?);
-    let source = source
+    let view = open_view(source, out)?;
+    let root = apply_to_view(view, args)?;
+    maybe_enter(&root, pref, Standing::Outside)
+}
+
+/// Resolve a source directory to the view that presents it, creating the view
+/// record if this is the first time we've seen that directory.
+///
+/// The spec of an existing view is reused, so `magicfs ~/photos` twice doesn't
+/// reset the ordering you had set up.
+fn open_view(source: Option<PathBuf>, out: Option<PathBuf>) -> Result<View> {
+    let requested = source.unwrap_or(std::env::current_dir()?);
+    if !requested.exists() {
+        bail!(
+            "no such directory: {}\n\
+             (magicfs works on a directory; `magicfs --help` lists the subcommands)",
+            requested.display()
+        );
+    }
+    let source = requested
         .canonicalize()
-        .with_context(|| format!("no such directory: {}", source.display()))?;
+        .with_context(|| format!("resolving {}", requested.display()))?;
     view::validate_source(&source)?;
 
     let base = view::base_dir();
-    std::fs::create_dir_all(&base)
-        .with_context(|| format!("creating {}", base.display()))?;
+    std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
     let root = view::allocate_root(&source, &base, out)?;
 
-    // Reuse the existing spec when re-entering a view we already built, so
-    // `magicfs ~/photos` twice doesn't reset the ordering you had set up.
-    let mut spec = match View::load(&root) {
+    let spec = match View::load(&root) {
         Ok(existing) => existing.spec,
         Err(_) => ViewSpec { seed: fresh_seed(), ..Default::default() },
     };
-    args.apply_to(&mut spec)?;
-
-    apply_to_view(View { root, source, spec }, SpecArgs::default())
+    Ok(View { root, source, spec })
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
@@ -144,16 +155,63 @@ fn apply_to_view(mut view: View, args: SpecArgs) -> Result<PathBuf> {
     Ok(view.root)
 }
 
-/// Apply a spec mutation to the view containing the cwd.
-fn mutate(f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
-    let mut view = current_view()?;
+/// Apply a spec mutation to the view containing the cwd — or, when we aren't
+/// in one, to a fresh view of the current directory.
+///
+/// That fallback is what makes `cd ~/photos; magicfs shuffle; ls` the whole
+/// interaction: reordering a plain directory implies wanting a view of it, so
+/// there is nothing to set up first.
+fn mutate(pref: ShellPref, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
+    let (mut view, standing) = match view::current()? {
+        Some(view) => (view, Standing::Inside),
+        None => (open_view(None, None)?, Standing::Outside),
+    };
     f(&mut view.spec)?;
-    apply_to_view(view, SpecArgs::default()).map(|_| ())
+    let root = apply_to_view(view, SpecArgs::default())?;
+    maybe_enter(&root, pref, standing)
 }
 
-fn reconfigure(args: SpecArgs) -> Result<()> {
-    let view = current_view()?;
-    apply_to_view(view, args).map(|_| ())
+fn reconfigure(pref: ShellPref, args: SpecArgs) -> Result<()> {
+    let (view, standing) = match view::current()? {
+        Some(view) => (view, Standing::Inside),
+        None => (open_view(None, None)?, Standing::Outside),
+    };
+    let root = apply_to_view(view, args)?;
+    maybe_enter(&root, pref, standing)
+}
+
+/// Whether the calling shell was already inside the view we just touched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    Inside,
+    Outside,
+}
+
+/// Put the user in the view, if that is both wanted and useful.
+///
+/// Three ways to land somewhere, in order of preference: the `shell-init`
+/// wrapper cds the real shell (so `cd -` goes back); failing that, at a
+/// terminal, a subshell (`exit` goes back); and when output is being captured,
+/// nothing at all — `$(magicfs .)` must stay a plain path on stdout.
+fn maybe_enter(root: &Path, pref: ShellPref, standing: Standing) -> Result<()> {
+    let enter = match pref {
+        ShellPref::Always => true,
+        ShellPref::Never => false,
+        // Already there, or the wrapper is about to move us: a subshell would
+        // only add a level to unwind.
+        ShellPref::Auto => {
+            standing == Standing::Outside
+                && std::env::var_os("MAGICFS_CD_FILE").is_none()
+                && is_interactive()
+        }
+    };
+    if enter { enter_shell(root, pref) } else { Ok(()) }
+}
+
+/// True when both stdin and stdout are a terminal — i.e. a person is typing,
+/// and nothing is capturing our stdout.
+fn is_interactive() -> bool {
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
 /// Replace this process with a shell rooted in the view.
@@ -162,13 +220,19 @@ fn reconfigure(args: SpecArgs) -> Result<()> {
 /// change its parent's working directory, so instead of moving the calling
 /// shell we start a new one that is already there. Exiting it returns the user
 /// exactly where they were, because the original shell never moved.
-fn enter_shell(dir: &Path) -> Result<()> {
+fn enter_shell(dir: &Path, pref: ShellPref) -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let nested = std::env::var_os("MAGICFS_SHELL").is_some();
 
-    if std::env::var_os("MAGICFS_SHELL").is_some() {
+    if nested {
         eprintln!("note: already in a magicfs shell — `exit` unwinds one level");
     }
     eprintln!("entering {} — `exit` to leave", dir.display());
+    // Only nag the first time, and only when we chose the subshell ourselves:
+    // someone who typed --shell already knows what they asked for.
+    if pref == ShellPref::Auto && !nested && let Ok(name) = crate::shellinit::detect() {
+        eprintln!("(to cd in place instead, install the wrapper: magicfs shell-init {name})");
+    }
 
     std::env::set_current_dir(dir)
         .with_context(|| format!("cannot enter {}", dir.display()))?;
@@ -181,11 +245,31 @@ fn enter_shell(dir: &Path) -> Result<()> {
     Err(err).with_context(|| format!("cannot start {shell}"))
 }
 
+/// What `magicfs close` should act on: the view we're standing in, or — when
+/// we're in a plain directory — the view that presents it.
+///
+/// The second case is the common one after leaving an auto-opened subshell:
+/// you're back in `~/photos` and the view still exists, so `magicfs close`
+/// there has exactly one sensible meaning.
+fn view_to_close() -> Result<View> {
+    if let Some(view) = view::current()? {
+        return Ok(view);
+    }
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    view::list_views()
+        .into_iter()
+        .find(|v| v.source == cwd)
+        .ok_or_else(|| anyhow::anyhow!("no magicfs view of {}", cwd.display()))
+}
+
+/// The view we're standing in — for the commands that can only ever mean an
+/// existing view (`status`, `which`).
 fn current_view() -> Result<View> {
     view::current()?.ok_or_else(|| {
         anyhow::anyhow!(
             "not inside a magicfs view.\n\
-             Create one first:  cd \"$(magicfs .)\""
+             Run `magicfs` (or `magicfs -s random`, `magicfs -s time`, ...) in \
+             a directory to open one."
         )
     })
 }
@@ -241,11 +325,7 @@ fn list() -> Result<()> {
 }
 
 fn close(all: bool) -> Result<()> {
-    let targets = if all {
-        view::list_views()
-    } else {
-        vec![current_view()?]
-    };
+    let targets = if all { view::list_views() } else { vec![view_to_close()?] };
     if targets.is_empty() {
         eprintln!("no views to close");
         return Ok(());
@@ -254,12 +334,27 @@ fn close(all: bool) -> Result<()> {
     let cwd = std::env::current_dir().ok();
     for view in targets {
         // Closing the view you are standing in would strand the shell in a
-        // deleted directory, so hand it back to the real source.
-        if cwd.as_deref().is_some_and(|c| c.starts_with(&view.root)) {
+        // deleted directory, so get it back to the real source first.
+        let standing_in_it = cwd.as_deref().is_some_and(|c| c.starts_with(&view.root));
+        let mut keep_dir = false;
+        if standing_in_it {
             emit_cd(&view.source)?;
-            eprintln!("returning to {}", view.source.display());
+            let src = view.source.display();
+            if std::env::var_os("MAGICFS_CD_FILE").is_some() {
+                // The wrapper cds the real shell the moment we exit.
+                eprintln!("returning to {src}");
+            } else {
+                // Nothing will move this shell, so the directory has to outlive
+                // the view or every later command dies on getcwd.
+                keep_dir = true;
+                if std::env::var_os("MAGICFS_SHELL").is_some() {
+                    eprintln!("`exit` to return to {src}");
+                } else {
+                    eprintln!("your shell is still in the closed view — cd {src}");
+                }
+            }
         }
-        links::close(&view)?;
+        links::close(&view, keep_dir)?;
         let _ = view::registry_remove(&view.root);
         eprintln!("closed {}", view.root.display());
     }
@@ -321,7 +416,11 @@ fn paths(args: SpecArgs, print0: bool) -> Result<()> {
 }
 
 /// `magicfs demo` — build a sample directory and suggest what to try in it.
-fn demo(count: usize, out: Option<PathBuf>, shell: bool) -> Result<()> {
+///
+/// The suggestions are deliberately free of shell-specific syntax: `$(...)` is
+/// a bash-ism that tcsh rejects outright, and a first-run hint that errors is
+/// worse than no hint at all.
+fn demo(count: usize, out: Option<PathBuf>, open: bool, pref: ShellPref) -> Result<()> {
     if count == 0 {
         bail!("--count must be at least 1");
     }
@@ -331,16 +430,19 @@ fn demo(count: usize, out: Option<PathBuf>, shell: bool) -> Result<()> {
     let files = build_plan(&dir, &spec)?;
     eprintln!("created {} files in {}", files.len(), dir.display());
     eprintln!();
-    eprintln!("  cd \"$(magicfs {} -s size)\"   # or add --shell", dir.display());
-    eprintln!("  ls                 # biggest first");
-    eprintln!("  magicfs shuffle    # `feh *` now opens in random order");
-    eprintln!("  magicfs sort natural");
+    eprintln!("  cd {}", dir.display());
+    eprintln!("  magicfs -s size      # opens a view, biggest first");
+    eprintln!("  ls");
+    eprintln!("  magicfs -s random    # `feh *` now opens in random order");
+    eprintln!("  magicfs -s natural");
     eprintln!("  magicfs filter images");
-    eprintln!("  magicfs close      # removes the view, not the files");
+    eprintln!("  magicfs close        # removes the view, not the files");
 
-    if shell {
-        let view = root(Some(dir), SpecArgs::default(), None)?;
-        return enter_shell(&view);
+    // `demo --shell` reads as "put me in it", so treat it as `--open` too.
+    if open || pref == ShellPref::Always {
+        let view = open_view(Some(dir), None)?;
+        let root = apply_to_view(view, SpecArgs::default())?;
+        return maybe_enter(&root, pref, Standing::Outside);
     }
     println!("{}", dir.display());
     Ok(())

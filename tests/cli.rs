@@ -143,7 +143,7 @@ fn filtering_restricts_what_a_glob_would_see() {
 }
 
 #[test]
-fn shuffle_reorders_and_is_re_rollable() {
+fn random_reorders_and_re_rolls_each_time() {
     let fx = Fixture::new("shuffle");
     for i in 0..30 {
         fx.photo(&format!("f{i:02}.jpg"), "2024-01-01");
@@ -152,14 +152,59 @@ fn shuffle_reorders_and_is_re_rollable() {
     let view = PathBuf::from(view);
     let alphabetical = fx.glob(&view);
 
-    fx.run(&["shuffle"], &view);
+    // There is no `shuffle` subcommand: `-s random` is the shuffle, and asking
+    // again re-rolls it.
+    fx.run(&["-s", "random"], &view);
     let first = fx.glob(&view);
-    fx.run(&["shuffle"], &view);
+    fx.run(&["-s", "random"], &view);
     let second = fx.glob(&view);
 
-    assert_ne!(first, alphabetical, "shuffle should not match name order");
-    assert_ne!(first, second, "a second shuffle should re-roll");
+    assert_ne!(first, alphabetical, "random should not match name order");
+    assert_ne!(first, second, "a second `-s random` should re-roll");
     assert_eq!(first.len(), 30);
+}
+
+#[test]
+fn a_rebuild_that_is_not_a_re_sort_preserves_the_shuffle() {
+    // Adding a filter to a shuffled view must not scramble what you were
+    // looking at.
+    let fx = Fixture::new("shuffle-stable");
+    for i in 0..30 {
+        fx.photo(&format!("f{i:02}.jpg"), "2024-01-01");
+    }
+    let (view, _, _) = fx.run(&["-s", "random"], &fx.source);
+    let view = PathBuf::from(view);
+    let before = fx.glob(&view);
+
+    fx.run(&["refresh"], &view);
+    assert_eq!(fx.glob(&view), before, "refresh must keep the shuffle");
+}
+
+#[test]
+fn reordering_a_plain_directory_opens_a_view_of_it() {
+    // `cd dir; magicfs -s random` — no view to set up first, no `.` to type.
+    let fx = chronological_fixture("implicit-cwd");
+    let (view, stderr, ok) = fx.run(&["-s", "random"], &fx.source);
+    assert!(ok, "got: {stderr}");
+    assert_eq!(fx.glob(Path::new(&view)).len(), 5);
+}
+
+#[test]
+fn subcommands_also_open_a_view_when_run_outside_one() {
+    let fx = chronological_fixture("implicit-sub");
+    let (view, stderr, ok) = fx.run(&["filter", "png"], &fx.source);
+    assert!(ok, "got: {stderr}");
+    assert_eq!(fx.glob(Path::new(&view)), vec!["001-ddd.png", "002-eee.png"]);
+}
+
+#[test]
+fn output_capture_suppresses_the_subshell() {
+    // Everything here runs with stdout piped, so magicfs must print a path and
+    // exit rather than exec a shell — otherwise `$(magicfs .)` would hang.
+    let fx = chronological_fixture("no-subshell");
+    let (view, _, ok) = fx.run(&["-s", "time"], &fx.source);
+    assert!(ok);
+    assert!(Path::new(&view).is_dir(), "stdout should be just the view path");
 }
 
 #[test]
@@ -206,8 +251,10 @@ fn close_removes_the_view_and_leaves_the_source_untouched() {
     let view = PathBuf::from(&view);
     assert!(view.exists());
 
-    let (_, _, ok) = fx.run(&["close"], &view);
-    assert!(ok);
+    // From the source directory: nothing is standing in the view, so it goes
+    // entirely. This is where you are after leaving an auto-opened subshell.
+    let (_, stderr, ok) = fx.run(&["close"], &fx.source);
+    assert!(ok, "close from the source directory failed: {stderr}");
     assert!(!view.exists(), "view directory should be gone");
     assert_eq!(
         std::fs::read_dir(&fx.source).unwrap().count(),
@@ -217,11 +264,35 @@ fn close_removes_the_view_and_leaves_the_source_untouched() {
 }
 
 #[test]
-fn commands_outside_a_view_explain_themselves() {
+fn closing_the_view_you_stand_in_leaves_the_directory_walkable() {
+    // Without a wrapper to cd it, the calling shell cannot be moved out — and
+    // deleting its cwd makes every later command fail on getcwd.
+    let fx = chronological_fixture("close-inside");
+    let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
+    let view = PathBuf::from(&view);
+
+    let (_, stderr, ok) = fx.run(&["close"], &view);
+    assert!(ok, "got: {stderr}");
+    assert!(view.is_dir(), "cwd must stay valid: {stderr}");
+    assert_eq!(fx.glob(&view).len(), 0, "but the links must be gone");
+    assert!(
+        stderr.contains(fx.source.to_str().unwrap()),
+        "should say where to get back to: {stderr}"
+    );
+}
+
+#[test]
+fn view_only_commands_outside_a_view_explain_themselves() {
+    // `status` cannot invent a view the way `-s time` can, so it still errors —
+    // but its advice must be runnable in any shell, not just bash.
     let fx = Fixture::new("no-view");
-    let (_, stderr, ok) = fx.run(&["shuffle"], &fx.dir);
-    assert!(!ok, "shuffle outside a view should fail");
+    let (_, stderr, ok) = fx.run(&["status"], &fx.dir);
+    assert!(!ok, "status outside a view should fail");
     assert!(stderr.contains("not inside a magicfs view"), "got: {stderr}");
+    assert!(
+        !stderr.contains("$("),
+        "hint uses bash-only syntax that tcsh rejects: {stderr}"
+    );
 }
 
 #[test]

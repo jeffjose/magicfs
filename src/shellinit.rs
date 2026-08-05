@@ -62,7 +62,8 @@ pub fn script(shell: Option<&str>) -> Result<String> {
     ))
 }
 
-fn detect() -> Result<String> {
+/// The user's shell, by basename of `$SHELL`.
+pub fn detect() -> Result<String> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let base = shell.rsplit('/').next().unwrap_or("");
     if base.is_empty() {
