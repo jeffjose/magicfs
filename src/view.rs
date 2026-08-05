@@ -171,13 +171,25 @@ pub fn current() -> Result<Option<View>> {
     Ok(find_containing(&cwd))
 }
 
+/// Characters used in a view's id: lowercase alphanumerics minus the pairs
+/// that are hard to tell apart when read off a prompt (`0`/`o`, `1`/`l`/`i`).
+const ID_ALPHABET: &[u8] = b"23456789abcdefghjkmnpqrstuvwxyz";
+const ID_LEN: usize = 3;
+
 /// Choose the directory for a new view over `source`.
 ///
-/// Reuses an existing view of the same source rather than accumulating
-/// duplicates, so running `magicfs` twice in a photo directory lands you back
-/// in the view you already had.
+/// Every call gets its own directory — `~/photos` opened twice yields
+/// `photos-4dk` and `photos-q7f`, never the same one. Reusing a view would
+/// mean a second terminal silently reordering the directory the first one is
+/// standing in, and two different directories that happen to share a basename
+/// would fight over the same name.
+///
+/// The name is claimed by creating it, which is atomic, so two magicfs
+/// processes racing on the same id cannot both win.
 pub fn allocate_root(source: &Path, base: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(root) = explicit {
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("creating {}", root.display()))?;
         return Ok(root);
     }
     let stem = source
@@ -185,26 +197,42 @@ pub fn allocate_root(source: &Path, base: &Path, explicit: Option<PathBuf>) -> R
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "root".to_string());
 
-    let first = base.join(format!("{stem}-magicfs"));
-    for n in 1.. {
-        let candidate = if n == 1 { first.clone() } else { base.join(format!("{stem}-magicfs-{n}")) };
-        match View::load(&candidate) {
-            // An existing view of the same source: reuse it.
-            Ok(v) if v.source == source => return Ok(candidate),
-            // Someone else's view under the name we wanted: try the next.
-            Ok(_) => continue,
-            Err(_) if candidate.exists() => {
-                // A non-view directory in the way. Only step aside if it has
-                // contents we'd otherwise be trampling.
-                if std::fs::read_dir(&candidate).map(|mut d| d.next().is_some()).unwrap_or(true) {
-                    continue;
-                }
-                return Ok(candidate);
+    let mut entropy = crate::spec::fresh_seed();
+    for attempt in 0.. {
+        entropy = crate::spec::mix64(entropy ^ attempt);
+        let candidate = base.join(format!("{stem}-{}", id_from(entropy)));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            // Taken — by another view, or by another magicfs a moment ago.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("creating {}", candidate.display()));
             }
-            Err(_) => return Ok(candidate),
         }
     }
     unreachable!()
+}
+
+fn id_from(mut n: u64) -> String {
+    let mut out = String::with_capacity(ID_LEN);
+    for _ in 0..ID_LEN {
+        out.push(ID_ALPHABET[(n % ID_ALPHABET.len() as u64) as usize] as char);
+        n /= ID_ALPHABET.len() as u64;
+    }
+    out
+}
+
+/// Every directory under `base` that is not a live view — the leftovers of
+/// views closed while a shell was standing in them, plus anything a crash left
+/// behind. Used by `magicfs clean`.
+pub fn stale_dirs(base: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .map(|d| d.path())
+        .filter(|p| p.is_dir() && !p.join(STATE_FILE).exists())
+        .collect()
 }
 
 /// Reject sources that would make a view of a view.
@@ -266,35 +294,60 @@ mod tests {
     }
 
     #[test]
-    fn allocate_reuses_an_existing_view_of_the_same_source() {
-        let td = TempDir::new("view-alloc-reuse");
+    fn allocate_never_hands_out_the_same_directory_twice() {
+        // Reuse would mean a second terminal reordering the view the first one
+        // is standing in.
+        let td = TempDir::new("view-alloc-unique");
         let base = td.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
         let source = PathBuf::from("/home/u/photos");
 
-        let first = allocate_root(&source, &base, None).unwrap();
-        assert_eq!(first.file_name().unwrap(), "photos-magicfs");
-        std::fs::create_dir_all(&first).unwrap();
-        view_at(&first, &source).save().unwrap();
-
-        // Same source again → same directory, not photos-magicfs-2.
-        assert_eq!(allocate_root(&source, &base, None).unwrap(), first);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let root = allocate_root(&source, &base, None).unwrap();
+            assert!(root.is_dir(), "the name must be claimed, not just chosen");
+            assert!(seen.insert(root.clone()), "handed out {root:?} twice");
+        }
     }
 
     #[test]
-    fn allocate_steps_aside_for_a_different_source_with_the_same_name() {
+    fn allocate_keeps_the_source_name_visible_and_readable() {
+        let td = TempDir::new("view-alloc-name");
+        let base = td.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let root = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap();
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let id = name.strip_prefix("photos-").expect("should read `photos-<id>`");
+        assert_eq!(id.len(), ID_LEN, "got {name}");
+        assert!(
+            id.bytes().all(|b| ID_ALPHABET.contains(&b)),
+            "id should avoid look-alike characters: {name}"
+        );
+    }
+
+    #[test]
+    fn two_directories_with_the_same_name_get_separate_views() {
         let td = TempDir::new("view-alloc-clash");
         let base = td.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
 
         let a = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap();
-        std::fs::create_dir_all(&a).unwrap();
-        view_at(&a, Path::new("/home/u/photos")).save().unwrap();
-
-        // A different directory that happens to also be called `photos`.
         let b = allocate_root(Path::new("/mnt/backup/photos"), &base, None).unwrap();
         assert_ne!(a, b);
-        assert_eq!(b.file_name().unwrap(), "photos-magicfs-2");
+    }
+
+    #[test]
+    fn stale_dirs_finds_leftovers_but_not_live_views() {
+        let td = TempDir::new("view-stale");
+        let base = td.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let live = allocate_root(Path::new("/src"), &base, None).unwrap();
+        view_at(&live, Path::new("/src")).save().unwrap();
+        let husk = allocate_root(Path::new("/src"), &base, None).unwrap();
+
+        assert_eq!(stale_dirs(&base), vec![husk]);
     }
 
     #[test]

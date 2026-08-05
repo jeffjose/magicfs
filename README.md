@@ -4,7 +4,7 @@ Present a directory in whatever order you want, so that `*` expands to it.
 
 ```console
 $ cd ~/photos
-$ magicfs -s time                # newest-first — and it puts you in the view
+$ magicfs -s time                # newest-first — puts you in the view and lists it
 $ feh *                          # opens newest-first
 $ magicfs -s random              # reshuffle
 $ feh *                          # now random
@@ -66,14 +66,24 @@ whether or not you have a view open.
 
 ## How the view is built
 
-A view is a plain directory of symlinks under `$XDG_RUNTIME_DIR/magicfs/`. No
-mount, no daemon, no root, nothing to leak — and because the kernel resolves a
-symlink once, reads afterwards run at full native speed. Reconfiguring only
-touches the links that actually moved (20,000 files: ~70ms to build, ~150ms to
-reshuffle).
+A view is a plain directory of symlinks under `$XDG_RUNTIME_DIR/magicfs/`, named
+after the source with a short random id — `photos-4dk`. No mount, no daemon, no
+root, nothing to leak — and because the kernel resolves a symlink once, reads
+afterwards run at full native speed. Reconfiguring only touches the links that
+actually moved (20,000 files: ~70ms to build, ~150ms to reshuffle).
 
-Views never modify or delete your real files. `magicfs close` removes links
-only.
+**Every invocation gets its own view.** Opening `~/photos` twice yields
+`photos-4dk` and `photos-q7f`, and an id is never handed out twice. Reuse would
+mean a second terminal silently reordering the directory the first one is
+standing in, and two unrelated directories that happen to share a basename
+would fight over the same name. Once you *are* in a view, commands reconfigure
+it in place, so your shell is never left in an abandoned directory.
+
+Views cost nothing but symlinks, so let them pile up and run `magicfs clean`
+when you want the space back in `magicfs list`.
+
+Views never modify or delete your real files. `magicfs close` and `magicfs
+clean` remove links only.
 
 ## Commands
 
@@ -89,6 +99,7 @@ only.
 | `magicfs refresh` | Pick up changes in the source directory |
 | `magicfs status` / `list` | Inspect views |
 | `magicfs close [--all]` | Remove views (links only) |
+| `magicfs clean [--yes]` | Remove every view and leftover; without `--yes`, just report |
 | `magicfs exec CMD...` | Run CMD with the ordered files as arguments |
 | `magicfs paths [-0]` | Print the ordered real paths |
 | `magicfs which NAME` | Real path behind a view entry |
@@ -100,7 +111,8 @@ running it again re-rolls. Every other rebuild (`refresh`, `filter`, ...) keeps
 the seed, so a shuffle survives adding a file to the directory.
 
 `magicfs close` works both from inside the view and from the directory it
-presents — which is where you are after leaving one.
+presents — which is where you are after leaving one. From there it closes
+every view of that directory. `magicfs clean --yes` removes the lot.
 
 ### Options
 
@@ -178,6 +190,12 @@ cd `magicfs ~/photos -s time`        # tcsh
 
 `--no-cd` (or `MAGICFS_NO_CD=1`) turns the move off everywhere and just prints
 the path; `--shell` forces the subshell even when output is redirected.
+
+After landing, magicfs lists the directory for you — the resulting order *is*
+the answer, and making you type `ls` to see it wastes the round trip. Set
+`MAGICFS_LS` to change the command (`MAGICFS_LS='eza -l'`) or to an empty
+string to turn it off; it is skipped past 100 entries, and whenever output is
+captured.
 
 Closing the view you're standing in is the one case that can't be tidy: with a
 wrapper you're returned to the source directory, and without one magicfs leaves

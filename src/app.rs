@@ -56,6 +56,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Command::Status) => status(),
         Some(Command::List) => list(),
         Some(Command::Close { all }) => close(all),
+        Some(Command::Clean { yes }) => clean(yes),
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
@@ -230,7 +231,57 @@ fn land(dir: &Path, pref: CdPref, standing: Standing) -> Result<()> {
                 && is_interactive()
         }
     };
+
+    // Before any exec: the listing has to reach the terminal while we still
+    // exist as a process.
+    show_listing(dir);
+
     if subshell { enter_shell(dir) } else { Ok(()) }
+}
+
+/// What to run to show the directory we just landed in.
+///
+/// `-L` matters: without it `ls` reports the size and date of each *symlink*
+/// rather than of the file it points at, which reads as nonsense next to
+/// `[size desc]`.
+const DEFAULT_LS: &str = "ls -lhL --color=auto";
+
+/// Past this many entries a listing is a wall of text rather than an answer,
+/// so leave it to the user to ask for one.
+const LISTING_LIMIT: usize = 100;
+
+/// Show the contents of the directory we landed in.
+///
+/// The result *is* the answer to `magicfs -s size` — making the user type `ls`
+/// to see it wastes the round trip. Skipped when output is captured, since
+/// then this is a path-producing tool and nothing more.
+fn show_listing(dir: &Path) {
+    if !is_interactive() {
+        return;
+    }
+    let cmd = std::env::var("MAGICFS_LS").unwrap_or_else(|_| DEFAULT_LS.to_string());
+    let mut words = cmd.split_whitespace();
+    // `MAGICFS_LS=` is how you turn this off.
+    let Some(program) = words.next() else { return };
+
+    let visible = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| !e.file_name().as_encoded_bytes().starts_with(b"."))
+                .count()
+        })
+        .unwrap_or(0);
+    if visible > LISTING_LIMIT {
+        eprintln!("({visible} entries — listing skipped)");
+        return;
+    }
+
+    // Failure here is cosmetic: a missing `ls` must not fail the reorder that
+    // actually did the work.
+    let _ = std::process::Command::new(program)
+        .args(words)
+        .current_dir(dir)
+        .status();
 }
 
 /// True when both stdin and stdout are a terminal — i.e. a person is typing,
@@ -268,20 +319,22 @@ fn enter_shell(dir: &Path) -> Result<()> {
 }
 
 /// What `magicfs close` should act on: the view we're standing in, or — when
-/// we're in a plain directory — the view that presents it.
+/// we're in a plain directory — every view of it.
 ///
 /// The second case is the common one after leaving an auto-opened subshell:
-/// you're back in `~/photos` and the view still exists, so `magicfs close`
-/// there has exactly one sensible meaning.
-fn view_to_close() -> Result<View> {
+/// you're back in `~/photos`, and since each invocation makes its own view
+/// there may be several of them. Closing the lot is the only reading that
+/// leaves nothing behind for you to hunt down.
+fn views_to_close() -> Result<Vec<View>> {
     if let Some(view) = view::current()? {
-        return Ok(view);
+        return Ok(vec![view]);
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
-    view::list_views()
-        .into_iter()
-        .find(|v| v.source == cwd)
-        .ok_or_else(|| anyhow::anyhow!("no magicfs view of {}", cwd.display()))
+    let mine: Vec<View> = view::list_views().into_iter().filter(|v| v.source == cwd).collect();
+    if mine.is_empty() {
+        bail!("no magicfs view of {}", cwd.display());
+    }
+    Ok(mine)
 }
 
 /// The view we're standing in — for the commands that can only ever mean an
@@ -347,7 +400,7 @@ fn list() -> Result<()> {
 }
 
 fn close(all: bool) -> Result<()> {
-    let targets = if all { view::list_views() } else { vec![view_to_close()?] };
+    let targets = if all { view::list_views() } else { views_to_close()? };
     if targets.is_empty() {
         eprintln!("no views to close");
         return Ok(());
@@ -380,6 +433,60 @@ fn close(all: bool) -> Result<()> {
         let _ = view::registry_remove(&view.root);
         eprintln!("closed {}", view.root.display());
     }
+    Ok(())
+}
+
+/// `magicfs clean` — remove every view, plus the empty directories left behind
+/// by views closed while a shell was standing in them.
+///
+/// Views are nothing but symlinks, so this can never cost anything real; the
+/// `--yes` gate exists because it will pull the rug from under any other
+/// terminal currently sitting in a view.
+fn clean(yes: bool) -> Result<()> {
+    let views = view::list_views();
+    let stale = view::stale_dirs(&view::base_dir());
+    if views.is_empty() && stale.is_empty() {
+        eprintln!("nothing to clean");
+        return Ok(());
+    }
+
+    if !yes {
+        for view in &views {
+            eprintln!("would close {}  ({})", view.root.display(), view.source.display());
+        }
+        for dir in &stale {
+            eprintln!("would remove {}  (leftover)", dir.display());
+        }
+        eprintln!(
+            "\n{} view(s), {} leftover(s) — links only, no real files. Re-run with --yes.",
+            views.len(),
+            stale.len()
+        );
+        return Ok(());
+    }
+
+    let cwd = std::env::current_dir().ok();
+    let mut removed = 0usize;
+    for view in views {
+        // Same rule as `close`: never delete the directory this shell is in.
+        let standing_in_it = cwd.as_deref().is_some_and(|c| c.starts_with(&view.root));
+        if standing_in_it {
+            emit_cd(&view.source)?;
+            eprintln!("you are in {} — cd out, or `exit`", view.root.display());
+        }
+        links::close(&view, standing_in_it)?;
+        let _ = view::registry_remove(&view.root);
+        removed += 1;
+    }
+    for dir in stale {
+        if cwd.as_deref().is_some_and(|c| c.starts_with(&dir)) {
+            continue;
+        }
+        if std::fs::remove_dir(&dir).is_ok() {
+            removed += 1;
+        }
+    }
+    eprintln!("cleaned {removed} directories");
     Ok(())
 }
 

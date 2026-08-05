@@ -296,6 +296,59 @@ fn view_only_commands_outside_a_view_explain_themselves() {
 }
 
 #[test]
+fn a_second_terminal_gets_its_own_view() {
+    // Terminal A is standing in its view; terminal B running magicfs on the
+    // same directory must not reorder A's contents underneath it.
+    let fx = chronological_fixture("two-terminals");
+    let (a, _, _) = fx.run(&["-s", "time"], &fx.source);
+    let a = PathBuf::from(a);
+    let a_before = fx.glob(&a);
+
+    let (b, _, _) = fx.run(&["-s", "size"], &fx.source);
+    let b = PathBuf::from(b);
+
+    assert_ne!(a, b, "two invocations must not share a view directory");
+    assert_eq!(fx.glob(&a), a_before, "the first view must be untouched");
+    assert!(a.is_dir() && b.is_dir(), "both views should be live");
+}
+
+#[test]
+fn clean_needs_confirmation_and_then_removes_everything() {
+    let fx = chronological_fixture("clean");
+    let (a, _, _) = fx.run(&["-s", "time"], &fx.source);
+    let (b, _, _) = fx.run(&["-s", "size"], &fx.source);
+
+    let (_, stderr, ok) = fx.run(&["clean"], &fx.dir);
+    assert!(ok);
+    assert!(stderr.contains("would close"), "dry run should preview: {stderr}");
+    assert!(Path::new(&a).is_dir(), "dry run must not delete anything");
+
+    let (_, stderr, ok) = fx.run(&["clean", "--yes"], &fx.dir);
+    assert!(ok, "got: {stderr}");
+    assert!(!Path::new(&a).exists() && !Path::new(&b).exists(), "views should be gone");
+    assert_eq!(
+        std::fs::read_dir(&fx.source).unwrap().count(),
+        5,
+        "real files must survive"
+    );
+
+    let (_, stderr, _) = fx.run(&["clean"], &fx.dir);
+    assert!(stderr.contains("nothing to clean"), "got: {stderr}");
+}
+
+#[test]
+fn clean_sweeps_the_husks_left_by_closing_from_inside() {
+    let fx = chronological_fixture("clean-husk");
+    let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
+    let view = PathBuf::from(view);
+    fx.run(&["close"], &view); // leaves the emptied directory behind
+    assert!(view.is_dir(), "sanity: close-from-inside keeps the directory");
+
+    fx.run(&["clean", "--yes"], &fx.dir);
+    assert!(!view.exists(), "clean should sweep the leftover");
+}
+
+#[test]
 fn refuses_to_build_a_view_of_a_view() {
     let fx = chronological_fixture("nested");
     let (view, _, _) = fx.run(&["-s", "time"], &fx.source);

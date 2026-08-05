@@ -117,6 +117,12 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Remove every view and leftover directory. Only ever deletes links.
+    Clean {
+        /// Actually do it. Without this, `clean` only reports what it would remove.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a command with the ordered files as arguments, keeping their real names.
     Exec {
         #[command(flatten)]
