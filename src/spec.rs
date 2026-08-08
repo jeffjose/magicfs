@@ -105,6 +105,13 @@ pub struct ViewSpec {
     /// Frozen so that `magicfs refresh` reproduces the same shuffle; only
     /// `magicfs shuffle` re-rolls it.
     pub seed: u64,
+    /// Exactly which entries the view holds, as paths relative to the source.
+    ///
+    /// Set when a command line named specific files (`magicfs mpv *.mp4`), so
+    /// that the view is the files the command asked for and nothing else.
+    /// Empty means "everything the filters allow".
+    #[serde(default)]
+    pub only: Vec<String>,
     /// Include-globs. Empty means "everything".
     pub filter: Vec<String>,
     /// Exclude-globs, applied after `filter`.
@@ -127,6 +134,7 @@ impl Default for ViewSpec {
             sort: SortKey::Name,
             reverse: false,
             seed: 0,
+            only: Vec::new(),
             filter: Vec::new(),
             exclude: Vec::new(),
             limit: None,
@@ -155,6 +163,11 @@ impl ViewSpec {
                 if self.descending() { "desc" } else { "asc" }
             ),
         }];
+        // The names themselves would be a screenful; the count is the part
+        // that tells you the view is narrower than the directory.
+        if !self.only.is_empty() {
+            parts.push(format!("picked {}", self.only.len()));
+        }
         if !self.filter.is_empty() {
             parts.push(format!("filter {}", self.filter.join(",")));
         }

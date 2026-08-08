@@ -82,6 +82,13 @@ fn matches(set: &GlobSet, entry: &Entry, patterns: &[String]) -> bool {
 
 /// Apply the spec's filters, ordering, and limit.
 pub fn arrange(mut entries: Vec<Entry>, spec: &ViewSpec) -> Result<Vec<Entry>> {
+    // An explicit pick beats every pattern: these are the files a command line
+    // named, matched exactly, so a name full of glob metacharacters is safe.
+    if !spec.only.is_empty() {
+        let wanted: std::collections::HashSet<&str> =
+            spec.only.iter().map(String::as_str).collect();
+        entries.retain(|e| wanted.contains(e.rel.as_str()));
+    }
     if let Some(set) = build_globset(&spec.filter, spec.case_sensitive)? {
         entries.retain(|e| matches(&set, e, &spec.filter));
     }

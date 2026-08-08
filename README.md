@@ -17,6 +17,14 @@ There is nothing to install or configure first: `magicfs` on a plain directory
 opens a view of it *and* moves you there. `--no-cd` opts out. See
 [Getting into the view](#getting-into-the-view) for how, and how to get back.
 
+Or say it in one line — trailing words are a command to run in the view:
+
+```console
+$ magicfs -s random smplayer *   # shuffles ~/videos, plays it in that order
+```
+
+You don't have to quote the `*`. See [Running a command](#running-a-command).
+
 ## Why the filenames change
 
 The obvious design — a filesystem that returns entries in a custom order —
@@ -49,6 +57,48 @@ file an index prefix chosen so that alphabetical order *is* your order:
 ```
 
 The extension is preserved, so `*.png` still works.
+
+## Running a command
+
+Anything after the options is a command, run inside the view once it is built:
+
+```console
+$ magicfs -s random smplayer *          # shuffled, and played in that order
+$ magicfs -s time feh --scale-down *    # feh's flags are feh's
+$ magicfs -s random mpv *.mp4           # only the mp4s, shuffled
+```
+
+The `*` needs no quoting, which is the whole point — with
+`alias mfr='magicfs -s random'`, `mfr smplayer *` is the entire interaction.
+
+That takes some work, because the shell expands the glob *before* magicfs runs:
+what actually arrives is `smplayer a.mp4 b.mp4 c.mp4`, the right files in the
+wrong order. So arguments that name files in the directory are recognised as the
+glob's output, taken back out, and replaced with the view's names in the slot
+they came from. Everything else is left exactly where it was:
+
+| You type | The command gets |
+| --- | --- |
+| `mfr smplayer *` | `smplayer 001-c.mp4 002-a.mp4 003-b.mp4` |
+| `mfr smplayer --fullscreen *` | `smplayer --fullscreen 001-c.mp4 ...` — the flag is kept |
+| `mfr smplayer *.mp4` | only the mp4s, and the view holds only them |
+| `mfr cp * /backup` | `cp 001-c.mp4 ... /backup` — the destination stays last |
+| `mfr mpv` | the whole view, in order — naming no files means all of them |
+
+Quoting sidesteps the guesswork entirely, and lands in the same place:
+`mfr smplayer '*.mp4'` arrives unexpanded and is matched against the source
+directory here, and `mfr 'mpv --loop *'` — one quoted argument, a whole command
+line — is handed to a shell *inside* the view, which expands the glob there.
+
+Words that name nothing are none of our business (`/backup` above, or a `--flag`
+that belongs to the tool). The command replaces magicfs, so it owns the terminal
+and its exit status is the one you get; `--dry-run` prints the line instead.
+
+Files with no command at all are just a narrower view:
+
+```console
+$ magicfs -s time *.jpg          # a view of the JPEGs alone, newest first
+```
 
 ## Keeping the original filenames
 
@@ -101,6 +151,7 @@ clean` remove links only.
 | Command | Effect |
 | --- | --- |
 | `magicfs [DIR] [OPTS]` | Open a view of `DIR` (default: the current directory), or reconfigure the one you're in |
+| `magicfs [OPTS] CMD...` | ...and run `CMD` in it — see [Running a command](#running-a-command) |
 | `magicfs sort KEY` | `name`, `natural`, `time`, `ctime`, `atime`, `size`, `ext`, `random` |
 | `magicfs reverse` | Flip the current order |
 | `magicfs filter PAT...` | Restrict the view; no args clears |
@@ -129,7 +180,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
-`--case-sensitive` `--out` `--new` `--no-cd` `--shell`
+`--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run`
 
 Filter patterns accept a bare extension (`png`), a class (`images`, `raw`,
 `video`, `audio`, `docs`, `archives`), or a glob (`'IMG_*'`, `'2024/*'`).
@@ -184,6 +235,8 @@ The wrapper passes a scratch-file path in `MAGICFS_CD_FILE`; magicfs writes the
 view path there and the shell reads it back and cds. Only view-creating
 commands write it — `list`, `paths`, `exec`, and `which` never move you, and
 `close` writes the *source* directory so you land somewhere that still exists.
+`magicfs -s random smplayer *` writes it too, so when the player exits you are
+standing where it ran.
 
 **2. A subshell**, when there's no wrapper and you're at a terminal. magicfs
 starts a *new* shell already inside the view; `exit` returns you, because your
@@ -228,5 +281,5 @@ shell's cwd makes every later command fail on `getcwd`.
 
 ```sh
 cargo build --release      # target/release/magicfs
-cargo test                 # 80 tests
+cargo test                 # 119 tests
 ```

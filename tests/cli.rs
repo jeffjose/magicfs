@@ -233,6 +233,169 @@ fn exec_passes_original_names_in_our_order() {
     assert_eq!(names, vec!["aaa.jpg", "bbb.jpg", "ccc.jpg", "ddd.png", "eee.png"]);
 }
 
+/// What the shell hands us for `magicfs -s time smplayer *`: the glob is gone
+/// by the time we run, expanded into names in the shell's own order.
+fn expanded(fx: &Fixture) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(&fx.source)
+        .unwrap()
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn an_expanded_glob_becomes_the_view_in_the_right_order() {
+    let fx = chronological_fixture("run-glob");
+    let names = expanded(&fx);
+    let mut args = vec!["-s", "time", "--dry-run", "smplayer"];
+    args.extend(names.iter().map(String::as_str));
+
+    let (out, _, ok) = fx.run(&args, &fx.source);
+    assert!(ok, "running a command failed");
+    // The filenames the shell produced are gone; the view's are there instead,
+    // and sorting them the way a shell would reproduces newest-first.
+    assert_eq!(
+        out,
+        "smplayer 001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png"
+    );
+}
+
+#[test]
+fn the_commands_own_flags_survive_and_stay_in_front() {
+    let fx = chronological_fixture("run-flags");
+    let names = expanded(&fx);
+    let mut args = vec!["-s", "time", "--dry-run", "smplayer", "--fullscreen", "-Z"];
+    args.extend(names.iter().map(String::as_str));
+
+    let (out, _, ok) = fx.run(&args, &fx.source);
+    assert!(ok, "running a command failed");
+    assert!(
+        out.starts_with("smplayer --fullscreen -Z 001-aaa.jpg"),
+        "got {out}"
+    );
+}
+
+#[test]
+fn a_partial_glob_narrows_the_view_to_what_it_matched() {
+    let fx = chronological_fixture("run-subset");
+    // `smplayer *.png` — the shell expands it, so only the PNGs reach us.
+    let (out, _, ok) = fx.run(
+        &["-s", "time", "--dry-run", "smplayer", "ddd.png", "eee.png"],
+        &fx.source,
+    );
+    assert!(ok);
+    assert_eq!(out, "smplayer 001-ddd.png 002-eee.png");
+}
+
+#[test]
+fn a_quoted_pattern_is_expanded_against_the_view_instead() {
+    // Quoting means the shell never touched it, so we do the expansion — and
+    // land in exactly the same place.
+    let fx = chronological_fixture("run-quoted");
+    let (out, _, ok) = fx.run(&["-s", "time", "--dry-run", "smplayer", "*.png"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, "smplayer 001-ddd.png 002-eee.png");
+}
+
+#[test]
+fn arguments_that_name_no_file_are_left_where_they_were() {
+    // `cp * /backup` must not copy /backup into itself, nor lose it.
+    let fx = chronological_fixture("run-dest");
+    let names = expanded(&fx);
+    let mut args = vec!["-s", "time", "--dry-run", "cp"];
+    args.extend(names.iter().map(String::as_str));
+    args.push("/backup");
+
+    let (out, _, ok) = fx.run(&args, &fx.source);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "cp 001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png /backup"
+    );
+}
+
+#[test]
+fn a_command_naming_no_files_still_receives_the_whole_view() {
+    let fx = chronological_fixture("run-bare");
+    let (out, _, ok) = fx.run(&["-s", "time", "--dry-run", "mpv", "--loop"], &fx.source);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "mpv --loop 001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png"
+    );
+}
+
+#[test]
+fn a_command_actually_runs_inside_the_view() {
+    let fx = chronological_fixture("run-real");
+    let names = expanded(&fx);
+    let mut args = vec!["-s", "time", "echo"];
+    args.extend(names.iter().map(String::as_str));
+
+    let (out, _, ok) = fx.run(&args, &fx.source);
+    assert!(ok, "the command should run, not just be printed");
+    assert_eq!(
+        out,
+        "001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png"
+    );
+}
+
+#[test]
+fn the_commands_exit_status_is_ours() {
+    let fx = chronological_fixture("run-status");
+    let (_, _, ok) = fx.run(&["-s", "time", "false"], &fx.source);
+    assert!(!ok, "a failing command must fail the whole invocation");
+}
+
+#[test]
+fn files_with_no_command_are_just_a_narrower_view() {
+    // `magicfs -s time *.png` — nothing to run, so it is a view of the PNGs.
+    let fx = chronological_fixture("run-pick");
+    let (view, _, ok) = fx.run(&["-s", "time", "ddd.png", "eee.png"], &fx.source);
+    assert!(ok);
+    assert_eq!(fx.glob(Path::new(&view)), vec!["001-ddd.png", "002-eee.png"]);
+}
+
+#[test]
+fn a_narrowed_view_survives_being_reordered() {
+    let fx = chronological_fixture("run-pick-resort");
+    let (view, _, _) = fx.run(&["-s", "time", "ddd.png", "eee.png"], &fx.source);
+    let (_, _, ok) = fx.run(&["sort", "name", "-r"], Path::new(&view));
+    assert!(ok);
+    // Still the two PNGs, now reversed by name.
+    assert_eq!(fx.glob(Path::new(&view)), vec!["001-eee.png", "002-ddd.png"]);
+}
+
+#[test]
+fn a_command_run_from_inside_a_view_reorders_it_first() {
+    let fx = chronological_fixture("run-inside");
+    let (view, _, _) = fx.run(&["-s", "name"], &fx.source);
+    let view = PathBuf::from(&view);
+    // `*` in the view expands to the view's own links, which we have to follow
+    // back to the real files before we can rename them into the new order.
+    let names = fx.glob(&view);
+    let mut args = vec!["-s", "time", "-r", "--dry-run", "echo"];
+    args.extend(names.iter().map(String::as_str));
+
+    let (out, _, ok) = fx.run(&args, &view);
+    assert!(ok);
+    assert_eq!(
+        out,
+        "echo 001-eee.png 002-ddd.png 003-ccc.jpg 004-bbb.jpg 005-aaa.jpg"
+    );
+}
+
+#[test]
+fn a_quoted_command_line_is_handed_to_a_shell_in_the_view() {
+    let fx = chronological_fixture("run-shell");
+    let (out, _, ok) = fx.run(&["-s", "time", "echo *.png"], &fx.source);
+    assert!(ok, "the quoted line should run");
+    // The shell expanded the glob itself, in the view.
+    assert_eq!(out, "004-ddd.png 005-eee.png");
+}
+
 #[test]
 fn paths_emits_ordered_real_paths() {
     let fx = chronological_fixture("paths");
@@ -439,6 +602,22 @@ fn demo_lands_you_in_the_directory_it_creates() {
         cd_hint(&fx, &args, &fx.dir, "demo").as_deref(),
         Some(target.to_str().unwrap()),
         "demo should hand the shell its sample directory"
+    );
+}
+
+#[test]
+fn running_a_command_leaves_the_shell_in_the_view_too() {
+    // The command ran in the view, so that is where `cd -` should return from.
+    let fx = chronological_fixture("run-cd");
+    let hint = cd_hint(&fx, &["-s", "time", "true"], &fx.source, "run");
+    assert!(
+        hint.is_some_and(|h| Path::new(&h).is_dir()),
+        "a command invocation should still hand the shell the view"
+    );
+    assert_eq!(
+        cd_hint(&fx, &["--no-cd", "-s", "time", "true"], &fx.source, "run-off"),
+        None,
+        "--no-cd must suppress that too"
     );
 }
 

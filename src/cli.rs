@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::spec::{DirMode, SortKey, ViewSpec, fresh_seed};
@@ -18,6 +19,18 @@ prefix (001-, 002-, ...) chosen so that alphabetical order *is* your order.
   magicfs -s time                 reorder without leaving
   magicfs filter png              restrict it to PNGs
   magicfs close                   back to the real directory
+
+Trailing words are a command to run in the view, and you do not have to
+quote the glob — the filenames the shell expanded it to are recognised and
+replaced with the view's, in order:
+
+  magicfs -s random feh *         runs feh on a shuffled ~/photos
+  magicfs -s random feh -Z *.png  the flag is kept, the PNGs alone are used
+  magicfs -s time *.jpg           no command: a view of just the JPEGs
+
+Words that name no file are left alone, so `magicfs -s random cp * /backup`
+still copies to /backup. A single quoted argument is handed to a shell
+inside the view instead: magicfs -s random 'mpv --loop *'.
 
 At a terminal, a command that lands somewhere moves you there — via the
 `shell-init` wrapper if you installed one, otherwise by starting a subshell
@@ -36,12 +49,13 @@ argument list instead:
 // Not `args_conflicts_with_subcommands`: that would reject the global
 // --shell/--no-cd flags when they appear before a subcommand.
 #[command(subcommand_negates_reqs = true)]
+// The source directory and the trailing command never reach clap — `split_argv`
+// takes them out first — so the usage line has to name them itself.
+#[command(override_usage = "magicfs [OPTIONS] [SOURCE] [COMMAND...]\n       \
+                            magicfs <SUBCOMMAND> [ARGS]")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
-
-    /// Directory to present (default: the current directory).
-    pub source: Option<PathBuf>,
 
     #[command(flatten)]
     pub spec: SpecArgs,
@@ -49,6 +63,10 @@ pub struct Cli {
     /// Put the view here instead of under the runtime directory.
     #[arg(long, value_name = "DIR")]
     pub out: Option<PathBuf>,
+
+    /// Print the command that would run instead of running it.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Open a second view instead of reconfiguring the one you're in.
     ///
@@ -80,6 +98,118 @@ pub enum CdPref {
     /// Force the subshell even when output is redirected.
     Subshell,
     Never,
+}
+
+/// Parse the real command line: our own options, and the words after them.
+pub fn parse() -> (Cli, Vec<String>) {
+    let (options, rest) = split_argv(std::env::args());
+    (Cli::parse_from(options), rest)
+}
+
+/// Separate magicfs's own options from the trailing words — the source
+/// directory, the command to run in the view, or both.
+///
+/// clap can't do this itself: in `magicfs -s random mpv --loop *` it has no way
+/// to know that `--loop` belongs to mpv, and `trailing_var_arg` overshoots by
+/// also claiming the options in `magicfs ~/photos -s time`, which have always
+/// meant *our* sort key. So the split happens first and the trailing words
+/// never reach the parser at all.
+///
+/// Which options take a value is read back out of the parser itself, so this
+/// cannot drift away from the flags defined above.
+pub fn split_argv<I: IntoIterator<Item = String>>(argv: I) -> (Vec<String>, Vec<String>) {
+    use clap::CommandFactory;
+
+    let command = Cli::command();
+    let mut long_values: HashSet<String> = HashSet::new();
+    let mut short_values: HashSet<char> = HashSet::new();
+    for arg in command.get_arguments() {
+        if !arg.get_action().takes_values() {
+            continue;
+        }
+        long_values.extend(arg.get_long().map(str::to_string));
+        long_values.extend(arg.get_all_aliases().unwrap_or_default().iter().map(|a| a.to_string()));
+        short_values.extend(arg.get_short());
+    }
+    let subcommands: HashSet<String> = command
+        .get_subcommands()
+        .flat_map(|s| {
+            std::iter::once(s.get_name().to_string())
+                .chain(s.get_all_aliases().map(str::to_string))
+        })
+        .collect();
+
+    let args: Vec<String> = argv.into_iter().collect();
+    let mut out: Vec<String> = args.iter().take(1).cloned().collect();
+    let words = &args[out.len().min(args.len())..];
+
+    // The source directory, when it turned up before some of our options.
+    let mut held: Option<String> = None;
+    let mut trailing: &[String] = &[];
+
+    let mut i = 0;
+    while i < words.len() {
+        let word = words[i].as_str();
+        // An explicit `--` says what we are about to say anyway, and it is how
+        // you run a command whose name collides with a subcommand.
+        if word == "--" {
+            trailing = &words[i + 1..];
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            out.push(word.to_string());
+            i += 1;
+            // `--sort=random` carries its own value; `--sort random` eats the
+            // next word, which must not be mistaken for the command.
+            if !long.contains('=') && long_values.contains(long) && i < words.len() {
+                out.push(words[i].clone());
+                i += 1;
+            }
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            out.push(word.to_string());
+            i += 1;
+            if wants_next_word(word, &short_values) && i < words.len() {
+                out.push(words[i].clone());
+                i += 1;
+            }
+            continue;
+        }
+        // A subcommand parses its own arguments, so hand over the lot.
+        if subcommands.contains(word) {
+            out.extend(words[i..].iter().cloned());
+            return (out, Vec::new());
+        }
+        // A bare word with more of our options behind it can only be the
+        // source directory: `magicfs ~/photos -s time`. Anything else starts
+        // the trailing words, which we no longer look inside.
+        let more_options = words.get(i + 1).is_some_and(|w| w.starts_with('-'));
+        if held.is_none() && more_options && std::path::Path::new(word).is_dir() {
+            held = Some(word.to_string());
+            i += 1;
+            continue;
+        }
+        trailing = &words[i..];
+        break;
+    }
+
+    let mut rest: Vec<String> = held.into_iter().collect();
+    rest.extend(trailing.iter().cloned());
+    (out, rest)
+}
+
+/// Whether a short-option cluster still needs the following word as its value.
+///
+/// `-s time` does; `-stime` and `-rs time`'s leading `-r` do not.
+fn wants_next_word(word: &str, short_values: &HashSet<char>) -> bool {
+    let mut chars = word.chars().skip(1);
+    while let Some(c) = chars.next() {
+        if short_values.contains(&c) {
+            return chars.next().is_none();
+        }
+    }
+    false
 }
 
 impl Cli {
@@ -298,20 +428,66 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// Parse the way the binary does: split first, then hand clap its half.
+    fn parse_from(argv: &[&str]) -> (Cli, Vec<String>) {
+        let (options, rest) = split_argv(argv.iter().map(|s| s.to_string()));
+        (Cli::try_parse_from(options).unwrap(), rest)
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn root_command_takes_a_source_and_options() {
-        let cli = Cli::try_parse_from(["magicfs", "/photos", "-s", "time", "-f", "png"]).unwrap();
+        // The source turns up before our own options and must not swallow them.
+        let (cli, rest) = parse_from(&["magicfs", "/tmp", "-s", "time", "-f", "png"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.source, Some(PathBuf::from("/photos")));
+        assert_eq!(rest, words(&["/tmp"]));
         assert_eq!(cli.spec.sort.as_deref(), Some("time"));
         assert_eq!(cli.spec.filter, vec!["png".to_string()]);
     }
 
     #[test]
     fn subcommands_win_over_the_positional_source() {
-        let cli = Cli::try_parse_from(["magicfs", "reverse"]).unwrap();
+        let (cli, rest) = parse_from(&["magicfs", "reverse"]);
         assert!(matches!(cli.command, Some(Command::Reverse)));
-        assert_eq!(cli.source, None);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn a_trailing_command_keeps_its_own_flags() {
+        // The whole point: `--loop` belongs to mpv, `-s` belonged to us.
+        let (cli, rest) = parse_from(&["magicfs", "-s", "random", "mpv", "--loop", "a.mp4"]);
+        assert_eq!(cli.spec.sort.as_deref(), Some("random"));
+        assert_eq!(rest, words(&["mpv", "--loop", "a.mp4"]));
+    }
+
+    #[test]
+    fn a_source_can_come_before_both_our_options_and_the_command() {
+        let (cli, rest) = parse_from(&["magicfs", "/tmp", "-s", "random", "mpv", "*.mp4"]);
+        assert_eq!(cli.spec.sort.as_deref(), Some("random"));
+        assert_eq!(rest, words(&["/tmp", "mpv", "*.mp4"]));
+    }
+
+    #[test]
+    fn a_double_dash_escapes_a_command_named_like_a_subcommand() {
+        let (cli, rest) = parse_from(&["magicfs", "--", "list", "-l"]);
+        assert!(cli.command.is_none(), "`list` after -- is a command, not our subcommand");
+        assert_eq!(rest, words(&["list", "-l"]));
+    }
+
+    #[test]
+    fn attached_option_values_do_not_eat_the_command() {
+        for argv in [
+            &["magicfs", "--sort=random", "mpv"][..],
+            &["magicfs", "-srandom", "mpv"][..],
+            &["magicfs", "-rs", "random", "mpv"][..],
+        ] {
+            let (cli, rest) = parse_from(argv);
+            assert_eq!(cli.spec.sort.as_deref(), Some("random"), "{argv:?}");
+            assert_eq!(rest, words(&["mpv"]), "{argv:?}");
+        }
     }
 
     #[test]
@@ -387,9 +563,9 @@ mod tests {
 
     #[test]
     fn source_is_optional_so_cwd_is_implied() {
-        let cli = Cli::try_parse_from(["magicfs", "--sort=random"]).unwrap();
+        let (cli, rest) = parse_from(&["magicfs", "--sort=random"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.source, None);
+        assert!(rest.is_empty());
         assert_eq!(cli.spec.sort.as_deref(), Some("random"));
     }
 

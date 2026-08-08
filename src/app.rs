@@ -9,17 +9,23 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{Cli, Command, CdPref, SpecArgs};
 use crate::entry::scan;
+use crate::invoke::{self, Ask};
 use crate::links;
 use crate::naming::{Named, render};
 use crate::order::arrange;
 use crate::spec::{ViewSpec, fresh_seed};
 use crate::view::{self, View};
 
-pub fn run(cli: Cli) -> Result<()> {
+/// `rest` is everything after our own options: the source directory, the
+/// command to run in the view, or both — see [`crate::cli::split_argv`].
+pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
     let pref = cli.cd_pref();
     let new = cli.new;
     match cli.command {
-        None => root(cli.source, cli.spec, cli.out, pref, new),
+        None => {
+            let (source, ask) = invoke::interpret(rest);
+            root(source, cli.spec, cli.out, pref, new, ask, cli.dry_run)
+        }
         Some(Command::Sort { key, reverse }) => reconfigure(
             pref,
             new,
@@ -49,6 +55,7 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }),
         Some(Command::Clear) => mutate(pref, new, |spec| {
+            spec.only.clear();
             spec.filter.clear();
             spec.exclude.clear();
             spec.limit = None;
@@ -76,8 +83,8 @@ pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
     Ok(render(arrange(entries, spec)?, spec))
 }
 
-/// `magicfs [SOURCE] [OPTIONS]` — create a view, or reconfigure the one we're
-/// standing in.
+/// `magicfs [SOURCE] [OPTIONS] [COMMAND...]` — create a view, or reconfigure
+/// the one we're standing in, and optionally run something in it.
 ///
 /// `SOURCE` defaults to the current directory, so `magicfs -s random` needs no
 /// `.`; and with no options at all it just reports on the view you're in.
@@ -87,11 +94,16 @@ fn root(
     out: Option<PathBuf>,
     pref: CdPref,
     new: bool,
+    ask: Ask,
+    dry_run: bool,
 ) -> Result<()> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
     if source.is_none() && out.is_none() && !new
         && let Some(view) = view::current()? {
+            if ask != Ask::View {
+                return serve(view, args, ask, pref, Standing::Inside, dry_run);
+            }
             let root = if args.is_empty() {
                 report(&view)?
             } else {
@@ -108,8 +120,134 @@ fn root(
         (None, Some(current)) => sibling_of(&current)?,
         (None, None) => open_view(None, out)?,
     };
+    if ask != Ask::View {
+        return serve(view, args, ask, pref, Standing::Outside, dry_run);
+    }
     let root = apply_to_view(view, args, pref)?;
     land(&root, pref, Standing::Outside)
+}
+
+/// Build the view the trailing words asked for, then run them in it.
+///
+/// The two halves of the job pull on each other: which files the command named
+/// decides what the view holds, and the view decides what the command is
+/// finally handed. So the selection is resolved against a plain scan of the
+/// source first, then the view is built, and only then is the argv assembled
+/// from the names the view ended up with.
+fn serve(
+    mut view: View,
+    args: SpecArgs,
+    ask: Ask,
+    pref: CdPref,
+    standing: Standing,
+    dry_run: bool,
+) -> Result<()> {
+    args.apply_to(&mut view.spec)?;
+
+    let (words, has_program) = match &ask {
+        Ask::Run(words) => (words.clone(), true),
+        Ask::Pick(words) => (words.clone(), false),
+        Ask::View => unreachable!("serve is only called with something to do"),
+    };
+
+    // One quoted argument is a whole command line, and quoting is how you say
+    // "leave this alone": hand it to a shell in the view and let *that* expand
+    // the glob, which lands in the same place with none of the guesswork.
+    let shell_line = has_program && words.len() == 1 && invoke::is_shell_line(&words[0]);
+
+    let invocation = if shell_line {
+        None
+    } else {
+        let entries = scan(&view.source, &view.spec)?;
+        let picked = invoke::select(&words, has_program, &view.source, &entries)?;
+        // Naming no files at all means the whole view, which is also what the
+        // view already is — so don't wipe a narrowing an earlier command set.
+        if !picked.chosen.is_empty() {
+            view.spec.only = picked.chosen.clone();
+        }
+        Some(picked)
+    };
+
+    let plan = build_plan(&view.source, &view.spec)?;
+    if plan.is_empty() {
+        bail!("nothing matched [{}] in {}", view.spec.summary(), view.source.display());
+    }
+    links::apply(&view, &plan)?;
+    view.save()?;
+    eprintln!(
+        "{} → {} entries [{}]",
+        view.source.display(),
+        plan.len(),
+        view.spec.summary()
+    );
+
+    let Some(invocation) = invocation else {
+        return launch(&view, shell_argv(&words[0]), pref, standing, dry_run);
+    };
+    match ask {
+        // Files but no command: this was only ever a request for the view.
+        Ask::Pick(_) => {
+            print_path(&view.root, pref);
+            land(&view.root, pref, standing)
+        }
+        _ => launch(
+            &view,
+            invocation.with_files(plan.iter().map(|n| n.name.clone())),
+            pref,
+            standing,
+            dry_run,
+        ),
+    }
+}
+
+/// Run `argv` inside the view.
+///
+/// The cd hint goes out before the exec, so a shell with the `shell-init`
+/// wrapper installed is left in the view once the command exits — the same
+/// place the command itself ran, which is where `cd -` expects to come back
+/// from.
+fn launch(
+    view: &View,
+    argv: Vec<String>,
+    pref: CdPref,
+    standing: Standing,
+    dry_run: bool,
+) -> Result<()> {
+    let (program, rest) = argv.split_first().expect("a command has a program");
+    if dry_run {
+        // Quoted where it matters, so the printed line is one you could paste.
+        let shown: Vec<String> = argv
+            .iter()
+            .map(|w| {
+                if w.contains(char::is_whitespace) {
+                    format!("'{w}'")
+                } else {
+                    w.clone()
+                }
+            })
+            .collect();
+        println!("{}", shown.join(" "));
+        return Ok(());
+    }
+    if pref != CdPref::Never && standing == Standing::Outside {
+        emit_cd(&view.root)?;
+    }
+    std::env::set_current_dir(&view.root)
+        .with_context(|| format!("cannot enter {}", view.root.display()))?;
+
+    use std::os::unix::process::CommandExt;
+    // exec() replaces this process, so the tool inherits the terminal, the
+    // signal handling and the exit status directly.
+    let err = std::process::Command::new(program)
+        .args(rest)
+        .env("MAGICFS_VIEW", &view.root)
+        .exec();
+    Err(err).with_context(|| format!("cannot run `{program}`"))
+}
+
+fn shell_argv(line: &str) -> Vec<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    vec![shell, "-c".to_string(), line.to_string()]
 }
 
 /// A second, independent view of the same directory, starting from the same
