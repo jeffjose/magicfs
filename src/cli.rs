@@ -37,6 +37,14 @@ At a terminal, a command that lands somewhere moves you there — via the
 you leave with `exit`. Redirected or in `$(...)`, it just prints the path.
 `--no-cd` (or MAGICFS_NO_CD=1) turns that off; `--shell` forces it.
 
+To review a directory that keeps filling up, `--unseen` shows only files
+no command has been handed yet, and marks the ones it hands over:
+
+  magicfs -s time -r --unseen -n 5 smplayer *    the next 5 new, oldest first
+  magicfs unsee --last                           put the last batch back
+
+When nothing is new, the command is not run and magicfs exits 1.
+
 To keep the original filenames, skip the view and hand the tool an ordered
 argument list instead:
 
@@ -240,7 +248,7 @@ pub enum Command {
     Exclude { patterns: Vec<String> },
     /// Keep only the first N entries. `none` removes the limit.
     Limit { n: String },
-    /// Reset filters and limit, keeping the ordering.
+    /// Reset filters, limit and --unseen, keeping the ordering.
     Clear,
     /// Rebuild the view from the source directory.
     Refresh,
@@ -280,6 +288,18 @@ pub enum Command {
     },
     /// Print the real path behind a view entry.
     Which { name: String },
+    /// Mark files as seen, so `--unseen` skips them. No files: report what's seen.
+    Seen { files: Vec<String> },
+    /// Make files count as unseen again.
+    Unsee {
+        /// Undo the most recent marking — for a batch you didn't finish.
+        #[arg(long, conflicts_with = "all")]
+        last: bool,
+        /// Forget everything seen in this directory.
+        #[arg(long)]
+        all: bool,
+        files: Vec<String>,
+    },
     /// Create a throwaway directory of sample files for trying magicfs out.
     Demo {
         /// How many files to create.
@@ -321,6 +341,10 @@ pub struct SpecArgs {
     #[arg(short = 'n', long, value_name = "N")]
     pub limit: Option<usize>,
 
+    /// Only files no command has been handed yet; a command marks what it gets.
+    #[arg(short = 'u', long)]
+    pub unseen: bool,
+
     /// Flatten the whole subtree into one directory.
     #[arg(short = 'R', long)]
     pub recursive: bool,
@@ -351,6 +375,7 @@ impl SpecArgs {
             && self.filter.is_empty()
             && self.exclude.is_empty()
             && self.limit.is_none()
+            && !self.unseen
             && !self.recursive
             && self.dirs.is_none()
             && self.name_format.is_none()
@@ -388,6 +413,9 @@ impl SpecArgs {
         }
         if let Some(n) = self.limit {
             spec.limit = Some(n);
+        }
+        if self.unseen {
+            spec.unseen = true;
         }
         if self.recursive {
             spec.recursive = true;

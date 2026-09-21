@@ -49,6 +49,7 @@ impl Fixture {
             .current_dir(cwd)
             .env("MAGICFS_DIR", &self.base)
             .env("MAGICFS_REGISTRY", &self.registry)
+            .env("MAGICFS_SEEN_DIR", self.dir.join("seen"))
             .env_remove("MAGICFS_CD_FILE")
             .output()
             .expect("failed to run magicfs");
@@ -648,4 +649,88 @@ fn read_only_commands_never_move_you() {
     ] {
         assert_eq!(cd_hint(&fx, &args, &fx.source, label), None, "{label} moved the shell");
     }
+}
+
+/// `magicfs -s time --unseen ... echo *` from the source directory, the way
+/// the shell would hand it over.
+fn unseen_echo(fx: &Fixture, extra: &[&str]) -> (String, String, bool) {
+    let names = expanded(fx);
+    let mut args = vec!["-s", "time", "--unseen"];
+    args.extend_from_slice(extra);
+    args.push("echo");
+    args.extend(names.iter().map(String::as_str));
+    fx.run(&args, &fx.source)
+}
+
+#[test]
+fn unseen_hands_over_new_files_and_then_skips_them() {
+    let fx = chronological_fixture("unseen-batches");
+    let (out, err, ok) = unseen_echo(&fx, &["-n", "2"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "001-aaa.jpg 002-bbb.jpg");
+    assert!(err.contains("marked 2 seen"), "should say it marked them: {err}");
+
+    // The limit counts unseen files, so the next batch is the next two.
+    let (out, _, ok) = unseen_echo(&fx, &["-n", "2"]);
+    assert!(ok);
+    assert_eq!(out, "001-ccc.jpg 002-ddd.png");
+}
+
+#[test]
+fn when_nothing_is_new_the_command_does_not_run() {
+    // The expanded glob names every file, and "naming everything" must not
+    // fall back to handing over the whole directory again.
+    let fx = chronological_fixture("unseen-empty");
+    assert!(unseen_echo(&fx, &[]).2);
+
+    let (out, err, ok) = unseen_echo(&fx, &[]);
+    assert!(!ok, "caught up should exit non-zero");
+    assert!(out.is_empty(), "echo must not have run: {out}");
+    assert!(err.contains("nothing new") && err.contains("5 seen"), "got: {err}");
+    // No empty view left behind to cd into.
+    assert_eq!(std::fs::read_dir(&fx.base).unwrap().count(), 1, "only the first view");
+}
+
+#[test]
+fn a_dry_run_marks_nothing() {
+    let fx = chronological_fixture("unseen-dry");
+    assert!(unseen_echo(&fx, &["--dry-run"]).2);
+    let (out, _, ok) = unseen_echo(&fx, &[]);
+    assert!(ok);
+    assert_eq!(out.split(' ').count(), 5);
+}
+
+#[test]
+fn unsee_last_puts_the_latest_batch_back() {
+    let fx = chronological_fixture("unseen-undo");
+    assert!(unseen_echo(&fx, &["-n", "2"]).2);
+    assert!(unseen_echo(&fx, &["-n", "2"]).2);
+
+    let (_, err, ok) = fx.run(&["unsee", "--last"], &fx.source);
+    assert!(ok, "{err}");
+    let (out, _, _) = unseen_echo(&fx, &["-n", "2"]);
+    assert_eq!(out, "001-ccc.jpg 002-ddd.png", "the second batch is back, the first is not");
+}
+
+#[test]
+fn seen_star_starts_from_now() {
+    let fx = chronological_fixture("unseen-bootstrap");
+    let names = expanded(&fx);
+    let mut args = vec!["seen"];
+    args.extend(names.iter().map(String::as_str));
+    let (_, err, ok) = fx.run(&args, &fx.source);
+    assert!(ok, "{err}");
+
+    fx.photo("fff.mp4", "2024-02-01");
+    let (out, _, ok) = unseen_echo(&fx, &[]);
+    assert!(ok);
+    assert_eq!(out, "001-fff.mp4");
+}
+
+#[test]
+fn unsee_refuses_a_name_that_is_not_a_file() {
+    let fx = chronological_fixture("unseen-typo");
+    let (_, err, ok) = fx.run(&["unsee", "nope.mp4"], &fx.source);
+    assert!(!ok);
+    assert!(err.contains("nope.mp4"), "got: {err}");
 }

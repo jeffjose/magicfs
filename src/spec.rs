@@ -116,6 +116,10 @@ pub struct ViewSpec {
     pub filter: Vec<String>,
     /// Exclude-globs, applied after `filter`.
     pub exclude: Vec<String>,
+    /// Drop files already handed to a command — see [`crate::seen`]. Applied
+    /// before `limit`, so "5 unseen" means five you haven't seen.
+    #[serde(default)]
+    pub unseen: bool,
     /// Keep only the first N entries *after* ordering.
     pub limit: Option<usize>,
     /// Flatten the whole subtree into one directory.
@@ -137,6 +141,7 @@ impl Default for ViewSpec {
             only: Vec::new(),
             filter: Vec::new(),
             exclude: Vec::new(),
+            unseen: false,
             limit: None,
             recursive: false,
             dirs: DirMode::default(),
@@ -173,6 +178,9 @@ impl ViewSpec {
         }
         if !self.exclude.is_empty() {
             parts.push(format!("exclude {}", self.exclude.join(",")));
+        }
+        if self.unseen {
+            parts.push("unseen".to_string());
         }
         if let Some(n) = self.limit {
             parts.push(format!("limit {n}"));

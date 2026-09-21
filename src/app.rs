@@ -8,11 +8,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{Cli, Command, CdPref, SpecArgs};
-use crate::entry::scan;
+use crate::entry::{Entry, scan};
 use crate::invoke::{self, Ask};
 use crate::links;
 use crate::naming::{Named, render};
 use crate::order::arrange;
+use crate::seen::{self, Seen};
 use crate::spec::{ViewSpec, fresh_seed};
 use crate::view::{self, View};
 
@@ -58,6 +59,7 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
             spec.only.clear();
             spec.filter.clear();
             spec.exclude.clear();
+            spec.unseen = false;
             spec.limit = None;
             Ok(())
         }),
@@ -69,6 +71,8 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
+        Some(Command::Seen { files }) => mark_seen(&files),
+        Some(Command::Unsee { last, all, files }) => unsee(last, all, &files),
         Some(Command::Demo { count, out }) => demo(count, out, pref),
         Some(Command::ShellInit { name }) => {
             print!("{}", crate::shellinit::script(name.as_deref())?);
@@ -79,7 +83,12 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
 
 /// Resolve a spec into an ordered, named plan.
 pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
-    let entries = scan(source, spec)?;
+    let mut entries = scan(source, spec)?;
+    // Before `arrange`, so the limit counts only files you haven't seen.
+    if spec.unseen {
+        let seen = Seen::load(source)?;
+        entries.retain(|e| !seen.contains(e));
+    }
     Ok(render(arrange(entries, spec)?, spec))
 }
 
@@ -107,7 +116,7 @@ fn root(
             let root = if args.is_empty() {
                 report(&view)?
             } else {
-                apply_to_view(view, args, pref)?
+                apply_to_view(view, args, pref, Standing::Inside)?
             };
             // Already standing in it — only an explicit --shell nests another.
             return land(&root, pref, Standing::Inside);
@@ -123,7 +132,7 @@ fn root(
     if ask != Ask::View {
         return serve(view, args, ask, pref, Standing::Outside, dry_run);
     }
-    let root = apply_to_view(view, args, pref)?;
+    let root = apply_to_view(view, args, pref, Standing::Outside)?;
     land(&root, pref, Standing::Outside)
 }
 
@@ -170,7 +179,9 @@ fn serve(
 
     let plan = build_plan(&view.source, &view.spec)?;
     if plan.is_empty() {
-        bail!("nothing matched [{}] in {}", view.spec.summary(), view.source.display());
+        // Never fall back to "naming nothing means everything" here: with
+        // --unseen that would replay every file you have already watched.
+        return Err(nothing_new(&view, standing)?);
     }
     links::apply(&view, &plan)?;
     view.save()?;
@@ -180,6 +191,13 @@ fn serve(
         plan.len(),
         view.spec.summary()
     );
+    // A command is about to receive these, and that is what "seen" means.
+    // Marked at launch because the command replaces us — there is no "after"
+    // to wait for, and a player's exit status says nothing about what you
+    // watched anyway. `unsee --last` covers the batch you didn't finish.
+    if view.spec.unseen && has_program && !dry_run {
+        mark(&view.source, plan.iter().map(|n| &n.entry))?;
+    }
 
     let Some(invocation) = invocation else {
         return launch(&view, shell_argv(&words[0]), pref, standing, dry_run);
@@ -290,10 +308,19 @@ fn open_view(source: Option<PathBuf>, out: Option<PathBuf>) -> Result<View> {
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
-fn apply_to_view(mut view: View, args: SpecArgs, pref: CdPref) -> Result<PathBuf> {
+fn apply_to_view(
+    mut view: View,
+    args: SpecArgs,
+    pref: CdPref,
+    standing: Standing,
+) -> Result<PathBuf> {
     args.apply_to(&mut view.spec)?;
 
     let plan = build_plan(&view.source, &view.spec)?;
+    // Caught up is an answer, not an empty view to move into.
+    if plan.is_empty() && view.spec.unseen {
+        return Err(nothing_new(&view, standing)?);
+    }
     let stats = links::apply(&view, &plan)?;
     view.save()?;
 
@@ -333,13 +360,13 @@ fn print_path(path: &Path, pref: CdPref) {
 fn mutate(pref: CdPref, new: bool, f: impl FnOnce(&mut ViewSpec) -> Result<()>) -> Result<()> {
     let (mut view, standing) = target_view(new)?;
     f(&mut view.spec)?;
-    let root = apply_to_view(view, SpecArgs::default(), pref)?;
+    let root = apply_to_view(view, SpecArgs::default(), pref, standing)?;
     land(&root, pref, standing)
 }
 
 fn reconfigure(pref: CdPref, new: bool, args: SpecArgs) -> Result<()> {
     let (view, standing) = target_view(new)?;
-    let root = apply_to_view(view, args, pref)?;
+    let root = apply_to_view(view, args, pref, standing)?;
     land(&root, pref, standing)
 }
 
@@ -642,7 +669,13 @@ fn exec(args: SpecArgs, dry_run: bool, command: &[String]) -> Result<()> {
     let plan = build_plan(&source, &spec)?;
 
     if plan.is_empty() {
+        if spec.unseen {
+            return Err(caught_up(&source, &spec)?);
+        }
         bail!("nothing matched [{}] in {}", spec.summary(), source.display());
+    }
+    if spec.unseen && !dry_run {
+        mark(&source, plan.iter().map(|n| &n.entry))?;
     }
 
     let (program, leading) = command.split_first().expect("clap requires a command");
@@ -720,6 +753,122 @@ fn which(name: &str) -> Result<()> {
     let target = std::fs::read_link(&link)
         .with_context(|| format!("{name} is not an entry in {}", view.root.display()))?;
     println!("{}", target.display());
+    Ok(())
+}
+
+/// Record entries as seen and say so, along with how to take it back.
+fn mark<'a>(source: &Path, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
+    let mut seen = Seen::load(source)?;
+    let added = seen.mark(entries);
+    seen.save()?;
+    if added > 0 {
+        eprintln!("marked {added} seen — `magicfs unsee --last` puts them back");
+    }
+    Ok(())
+}
+
+/// The error for an empty result: "you're caught up" when --unseen is what
+/// emptied it, the usual "nothing matched" otherwise.
+///
+/// A view allocated just for this invocation is removed again — there is
+/// nothing in it to move into, and no reason to leave a husk for `clean`.
+fn nothing_new(view: &View, standing: Standing) -> Result<anyhow::Error> {
+    if standing == Standing::Outside {
+        let _ = std::fs::remove_dir(&view.root);
+    }
+    caught_up(&view.source, &view.spec)
+}
+
+fn caught_up(source: &Path, spec: &ViewSpec) -> Result<anyhow::Error> {
+    // What the view would hold if nothing had been seen: the files --unseen
+    // is actually hiding, so the count means something.
+    let everything = ViewSpec { unseen: false, limit: None, ..spec.clone() };
+    let entries = arrange(scan(source, &everything)?, &everything)?;
+    let seen = Seen::load(source)?;
+    let hidden = if spec.unseen { seen.count_in(&entries) } else { 0 };
+    if hidden == 0 {
+        return Ok(anyhow::anyhow!(
+            "nothing matched [{}] in {}",
+            spec.summary(),
+            source.display()
+        ));
+    }
+    let when = seen.last_marked_ago().map(|s| format!(", last marked {}", seen::ago(s)));
+    Ok(anyhow::anyhow!(
+        "nothing new in {} ({hidden} seen{})",
+        source.display(),
+        when.unwrap_or_default()
+    ))
+}
+
+/// The directory `seen`/`unsee` act on, and everything in it — the view's
+/// source when standing in one, so view names like `001-a.mp4` resolve too.
+fn seen_scope() -> Result<(PathBuf, Vec<Entry>)> {
+    let (source, spec) = resolve_source(&SpecArgs::default())?;
+    let entries = scan(&source, &spec)?;
+    Ok((source, entries))
+}
+
+/// The entries these words name. Every word has to name one: a typo in
+/// `magicfs unsee` must not quietly do nothing.
+fn named<'a>(files: &[String], source: &Path, entries: &'a [Entry]) -> Result<Vec<&'a Entry>> {
+    let picked = invoke::select(files, false, source, entries)?;
+    if let Some(stray) = picked.argv.first() {
+        bail!("`{stray}` is not a file in {}", source.display());
+    }
+    // `select` reports naming every file as naming none in particular.
+    if picked.chosen.is_empty() {
+        return Ok(entries.iter().collect());
+    }
+    let chosen: std::collections::HashSet<&str> =
+        picked.chosen.iter().map(String::as_str).collect();
+    Ok(entries.iter().filter(|e| chosen.contains(e.rel.as_str())).collect())
+}
+
+/// `magicfs seen [FILES...]` — mark by hand, or report.
+///
+/// `magicfs seen *` is how you start: everything already there counts as
+/// watched, and the next `--unseen` shows only what arrives after.
+fn mark_seen(files: &[String]) -> Result<()> {
+    let (source, entries) = seen_scope()?;
+    let mut seen = Seen::load(&source)?;
+    if files.is_empty() {
+        let when = seen
+            .last_marked_ago()
+            .map(|s| format!(", last marked {} ({} files)", seen::ago(s), seen.last_batch_len()))
+            .unwrap_or_default();
+        eprintln!(
+            "{}: {} of {} seen{when}",
+            source.display(),
+            seen.count_in(&entries),
+            entries.len()
+        );
+        return Ok(());
+    }
+    let added = seen.mark(named(files, &source, &entries)?);
+    seen.save()?;
+    eprintln!("marked {added} seen in {}", source.display());
+    Ok(())
+}
+
+/// `magicfs unsee --last | --all | FILES...`
+fn unsee(last: bool, all: bool, files: &[String]) -> Result<()> {
+    let (source, entries) = seen_scope()?;
+    let mut seen = Seen::load(&source)?;
+    let removed = if last {
+        if !files.is_empty() {
+            bail!("--last undoes a whole batch; drop the file names, or drop --last");
+        }
+        seen.unmark_last()
+    } else if all {
+        seen.clear()
+    } else if files.is_empty() {
+        bail!("unsee what? name files, or pass --last (the latest batch) or --all");
+    } else {
+        seen.unmark(named(files, &source, &entries)?)
+    };
+    seen.save()?;
+    eprintln!("{removed} unseen again in {}", source.display());
     Ok(())
 }
 

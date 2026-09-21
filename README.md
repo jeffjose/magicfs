@@ -100,6 +100,46 @@ Files with no command at all are just a narrower view:
 $ magicfs -s time *.jpg          # a view of the JPEGs alone, newest first
 ```
 
+## Reviewing only what's new
+
+For a directory that fills up while you watch it (a render finishing one video
+at a time, say), `-u/--unseen` shows only the files no command has been handed
+yet, and marks the ones it hands over:
+
+```console
+$ magicfs -s time -r -u -n 5 smplayer *   # the next 5 new videos, oldest first
+marked 5 seen — `magicfs unsee --last` puts them back
+$ magicfs -s time -r -u -n 5 smplayer *   # the 5 after those
+$ magicfs -s time -r -u smplayer *        # caught up
+magicfs: nothing new in ~/renders (43 seen, last marked 2m ago)
+```
+
+When nothing is new, the command doesn't run, no view is created, and the exit
+status is 1, so `&&` and shell loops do the right thing. The usual rule that
+naming every file means "the whole view" doesn't apply here: that would replay
+everything you've already watched.
+
+- **Seen means "handed to a command by magicfs".** atime would need no state,
+  but `noatime` mounts never update it, and thumbnailers and backups update it
+  for files nobody looked at.
+- **Files are marked at launch.** The command replaces magicfs, so there is no
+  "after" to wait for. If you quit halfway through a batch, `magicfs unsee
+  --last` puts the whole batch back.
+- **A changed file is new again.** Records are keyed on name, mtime and size,
+  so a re-render, or a file that was still being written when it was handed
+  over, comes back once it changes.
+- `-n` counts unseen files, so `-n 5` is five you haven't seen. `-s time` is
+  newest first, so add `-r` to go through a render in the order it finished.
+
+`magicfs seen *` marks everything that's already there, so the next `--unseen`
+shows only what arrives after it. `magicfs seen` with no files reports the
+count. `magicfs unsee FILE...` and `magicfs unsee --all` forget files.
+`--dry-run` marks nothing.
+
+The lists live in `$XDG_STATE_HOME/magicfs/seen/` (default
+`~/.local/state/magicfs/seen/`), one file per source directory, never in the
+directory itself. `magicfs clean` leaves them alone.
+
 ## Keeping the original filenames
 
 There is one ordering nothing downstream re-sorts: an explicit argument list.
@@ -157,7 +197,7 @@ clean` remove links only.
 | `magicfs filter PAT...` | Restrict the view; no args clears |
 | `magicfs exclude PAT...` | Drop matching entries |
 | `magicfs limit N` | Keep the first N; `none` removes the limit |
-| `magicfs clear` | Drop filters and limit, keep the ordering |
+| `magicfs clear` | Drop filters, limit and `--unseen`, keep the ordering |
 | `magicfs refresh` | Pick up changes in the source directory |
 | `magicfs status` / `list` | Inspect views |
 | `magicfs close [--all]` | Remove views (links only) |
@@ -165,6 +205,8 @@ clean` remove links only.
 | `magicfs exec CMD...` | Run CMD with the ordered files as arguments |
 | `magicfs paths [-0]` | Print the ordered real paths |
 | `magicfs which NAME` | Real path behind a view entry |
+| `magicfs seen [FILE...]` | Mark files seen; with none, report the count |
+| `magicfs unsee --last\|--all\|FILE...` | Make files count as new again |
 | `magicfs shell-init SHELL` | Emit the auto-cd wrapper |
 | `magicfs demo` | Create a throwaway directory of sample files |
 
@@ -178,7 +220,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 
 ### Options
 
-`-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit`
+`-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run`
 
@@ -281,5 +323,5 @@ shell's cwd makes every later command fail on `getcwd`.
 
 ```sh
 cargo build --release      # target/release/magicfs
-cargo test                 # 119 tests
+cargo test                 # 131 tests
 ```

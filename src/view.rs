@@ -76,11 +76,15 @@ fn registry_path() -> PathBuf {
     if let Some(p) = std::env::var_os("MAGICFS_REGISTRY") {
         return PathBuf::from(p);
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
+    state_home().join("magicfs/registry.json")
+}
+
+/// `$XDG_STATE_HOME`, falling back to `~/.local/state` as the spec says.
+pub fn state_home() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(std::env::temp_dir);
-    state.join("magicfs/registry.json")
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn registry_read() -> Vec<PathBuf> {

@@ -20,6 +20,7 @@ pub mod invoke;
 pub mod links;
 pub mod naming;
 pub mod order;
+pub mod seen;
 pub mod shellinit;
 pub mod spec;
 pub mod view;

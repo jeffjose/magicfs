@@ -10,17 +10,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 static ENV: std::sync::Once = std::sync::Once::new();
 
-/// Redirect the view registry into a scratch file so tests never touch (or
+/// Redirect the view registry and seen-lists into scratch files so tests never touch (or
 /// race on) the real one under `~/.local/state`.
 fn isolate_environment() {
     ENV.call_once(|| {
         let reg = std::env::temp_dir().join(format!("magicfs-test-registry-{}.json", std::process::id()));
         let base = std::env::temp_dir().join(format!("magicfs-test-base-{}", std::process::id()));
+        let seen = std::env::temp_dir().join(format!("magicfs-test-seen-{}", std::process::id()));
         // Safe: runs once, before any test body observes the environment, and
         // always writes the same values.
         unsafe {
             std::env::set_var("MAGICFS_REGISTRY", &reg);
             std::env::set_var("MAGICFS_DIR", &base);
+            std::env::set_var("MAGICFS_SEEN_DIR", &seen);
         }
     });
 }
