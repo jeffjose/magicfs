@@ -355,6 +355,14 @@ pub struct SpecArgs {
     #[arg(short = 'n', long, value_name = "N")]
     pub limit: Option<usize>,
 
+    /// Newest first, and only the newest unless -n says how many.
+    #[arg(long, conflicts_with_all = ["sort", "oldest"])]
+    pub latest: bool,
+
+    /// Oldest first, and only the oldest unless -n says how many.
+    #[arg(long, conflicts_with = "sort")]
+    pub oldest: bool,
+
     /// Only files no command has been handed yet; a command marks what it gets.
     #[arg(short = 'u', long)]
     pub unseen: bool,
@@ -390,6 +398,8 @@ impl SpecArgs {
             && self.exclude.is_empty()
             && self.limit.is_none()
             && !self.unseen
+            && !self.latest
+            && !self.oldest
             && !self.recursive
             && self.dirs.is_none()
             && self.name_format.is_none()
@@ -415,6 +425,10 @@ impl SpecArgs {
                 spec.seed = fresh_seed();
             }
             spec.sort = key;
+        } else if self.latest || self.oldest {
+            // `-r` on top flips it, as it would `-s time`.
+            spec.sort = SortKey::Time;
+            spec.reverse = self.oldest != self.reverse;
         } else if self.reverse {
             spec.reverse = true;
         }
@@ -427,6 +441,8 @@ impl SpecArgs {
         }
         if let Some(n) = self.limit {
             spec.limit = Some(n);
+        } else if self.latest || self.oldest {
+            spec.limit = Some(1);
         }
         if self.unseen {
             spec.unseen = true;
@@ -572,6 +588,20 @@ mod tests {
         assert_eq!(spec.limit, Some(5));
         assert!(spec.recursive);
         assert_eq!(spec.filter, vec!["png".to_string()]);
+    }
+
+    #[test]
+    fn latest_and_oldest_are_a_time_sort_and_a_limit() {
+        let spec = SpecArgs { latest: true, ..Default::default() }.to_spec().unwrap();
+        assert_eq!((spec.sort, spec.descending(), spec.limit), (SortKey::Time, true, Some(1)));
+
+        let spec = SpecArgs { oldest: true, limit: Some(3), ..Default::default() }
+            .to_spec()
+            .unwrap();
+        assert_eq!((spec.sort, spec.descending(), spec.limit), (SortKey::Time, false, Some(3)));
+
+        assert!(Cli::try_parse_from(["magicfs", "--latest", "--oldest"]).is_err());
+        assert!(Cli::try_parse_from(["magicfs", "--latest", "-s", "name"]).is_err());
     }
 
     #[test]

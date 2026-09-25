@@ -799,3 +799,14 @@ fn a_misspelt_file_is_named_back_with_what_it_probably_meant() {
     assert!(!ok);
     assert!(err.contains("did you mean `ddd.png`"), "got: {err}");
 }
+
+#[test]
+fn latest_and_oldest_pick_by_time() {
+    let fx = chronological_fixture("latest");
+    let (out, _, ok) = fx.run(&["--latest", "--dry-run", "echo"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, "echo 001-aaa.jpg");
+    let (out, _, ok) = fx.run(&["--oldest", "-n", "2", "--dry-run", "echo"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, "echo 001-eee.png 002-ddd.png");
+}

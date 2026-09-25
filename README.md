@@ -145,6 +145,16 @@ Files with no command at all are just a narrower view:
 $ magicfs -s time *.jpg          # a view of the JPEGs alone, newest first
 ```
 
+## By time
+
+`--latest` is the newest file and `--oldest` the oldest — `-s time -n 1`, and
+the same with `-r`. `-n` asks for more than one:
+
+```console
+$ magicfs --latest feh *           # the screenshot you just took
+$ magicfs --oldest -n 3 rm *       # the three oldest, after asking
+```
+
 ## Reviewing only what's new
 
 For a directory that fills up while you watch it (a render finishing one video
@@ -266,6 +276,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 ### Options
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
+`--latest` `--oldest`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
 `--links` `-y/--yes`
