@@ -120,6 +120,10 @@ pub struct ViewSpec {
     /// before `limit`, so "5 unseen" means five you haven't seen.
     #[serde(default)]
     pub unseen: bool,
+    /// Only files from this stretch of time — see [`crate::when`]. Kept as
+    /// written and re-read on every rebuild, so `today` stays today.
+    #[serde(default)]
+    pub when: Option<String>,
     /// Keep only the first N entries *after* ordering.
     pub limit: Option<usize>,
     /// Flatten the whole subtree into one directory.
@@ -142,6 +146,7 @@ impl Default for ViewSpec {
             filter: Vec::new(),
             exclude: Vec::new(),
             unseen: false,
+            when: None,
             limit: None,
             recursive: false,
             dirs: DirMode::default(),
@@ -178,6 +183,9 @@ impl ViewSpec {
         }
         if !self.exclude.is_empty() {
             parts.push(format!("exclude {}", self.exclude.join(",")));
+        }
+        if let Some(when) = &self.when {
+            parts.push(format!("when {when}"));
         }
         if self.unseen {
             parts.push("unseen".to_string());

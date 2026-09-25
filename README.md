@@ -155,6 +155,34 @@ $ magicfs --latest feh *           # the screenshot you just took
 $ magicfs --oldest -n 3 rm *       # the three oldest, after asking
 ```
 
+`-w/--when WINDOW` keeps only the files from a stretch of time, going by when
+each was last written. It works alongside everything else, so `*` means "the
+files from then":
+
+```console
+$ magicfs -w today feh *                  # today's, in name order
+$ magicfs -w yesterday.morning -s time mpv *
+$ magicfs -w 2h -s random feh *.png       # the last two hours' PNGs, shuffled
+$ magicfs -w lastweek rm *                # asks first
+```
+
+| Window | Means |
+| --- | --- |
+| `today` `yesterday` | midnight to midnight, local time |
+| `mon` … `sun` | the latest one — today, if today is that day |
+| `week` `lastweek` `month` `lastmonth` | weeks start on Monday |
+| `2026-09-24` `09-24` | that day (this year, if no year) |
+| `30m` `2h` `3d` `1w` | the last that long |
+| `morning` `afternoon` `evening` `night` | 5–12, 12–17, 17–22, 22–5; alone, the latest one that has started |
+| `yesterday.morning` `fri.night` | part of a particular day; night runs into the next morning |
+| `14:00..16:30` `yesterday.22..2` | clock times on one day (today unless named) |
+| `mon..wed` `09-20..` | whole days, either end open |
+| `mon,wed` | either |
+
+The window is kept as written and re-read whenever the view is rebuilt, so a
+view of `today` is still today's files after midnight. `-w all` or `magicfs
+clear` removes it.
+
 ## Reviewing only what's new
 
 For a directory that fills up while you watch it (a render finishing one video
@@ -252,7 +280,7 @@ clean` remove links only.
 | `magicfs filter PAT...` | Restrict the view; no args clears |
 | `magicfs exclude PAT...` | Drop matching entries |
 | `magicfs limit N` | Keep the first N; `none` removes the limit |
-| `magicfs clear` | Drop filters, limit and `--unseen`, keep the ordering |
+| `magicfs clear` | Drop filters, limit, `--when` and `--unseen`, keep the ordering |
 | `magicfs refresh` | Pick up changes in the source directory |
 | `magicfs status` / `list` | Inspect views |
 | `magicfs close [--all]` | Remove views (links only) |
@@ -276,7 +304,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 ### Options
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
-`--latest` `--oldest`
+`-w/--when` `--latest` `--oldest`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
 `--links` `-y/--yes`

@@ -355,6 +355,11 @@ pub struct SpecArgs {
     #[arg(short = 'n', long, value_name = "N")]
     pub limit: Option<usize>,
 
+    /// Only files from a stretch of time: today, yesterday.morning, 3h,
+    /// mon..wed, 14:00..16:30. `all` clears it.
+    #[arg(short = 'w', long, value_name = "WINDOW")]
+    pub when: Option<String>,
+
     /// Newest first, and only the newest unless -n says how many.
     #[arg(long, conflicts_with_all = ["sort", "oldest"])]
     pub latest: bool,
@@ -398,6 +403,7 @@ impl SpecArgs {
             && self.exclude.is_empty()
             && self.limit.is_none()
             && !self.unseen
+            && self.when.is_none()
             && !self.latest
             && !self.oldest
             && !self.recursive
@@ -446,6 +452,16 @@ impl SpecArgs {
         }
         if self.unseen {
             spec.unseen = true;
+        }
+        if let Some(when) = &self.when {
+            spec.when = match when.as_str() {
+                "all" | "any" | "none" | "off" => None,
+                text => {
+                    // Checked now, so a typo is reported before anything is built.
+                    crate::when::Window::parse(text, crate::when::now())?;
+                    Some(text.to_string())
+                }
+            };
         }
         if self.recursive {
             spec.recursive = true;

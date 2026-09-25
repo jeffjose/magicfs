@@ -810,3 +810,34 @@ fn latest_and_oldest_pick_by_time() {
     assert!(ok);
     assert_eq!(out, "echo 001-eee.png 002-ddd.png");
 }
+
+fn days_fixture(label: &str) -> Fixture {
+    let fx = Fixture::new(label);
+    fx.photo("now.png", "now");
+    fx.photo("yday-am.png", "yesterday 09:00");
+    fx.photo("yday-pm.png", "yesterday 15:00");
+    fx.photo("old.png", "2020-01-01");
+    fx
+}
+
+#[test]
+fn when_keeps_only_that_stretch_of_time() {
+    let fx = days_fixture("when");
+    let run = |w: &str| {
+        let (out, err, ok) = fx.run(&["-s", "time", "-w", w, "--dry-run", "echo"], &fx.source);
+        assert!(ok, "{w}: {err}");
+        out
+    };
+    assert_eq!(run("yesterday"), "echo 001-yday-pm.png 002-yday-am.png");
+    assert_eq!(run("yesterday.morning"), "echo 001-yday-am.png");
+    assert_eq!(run("1h"), "echo 001-now.png");
+    assert_eq!(run("today,2020-01-01"), "echo 001-now.png 002-old.png");
+}
+
+#[test]
+fn a_misspelt_window_is_refused_before_anything_runs() {
+    let fx = days_fixture("when-typo");
+    let (_, err, ok) = fx.run(&["-w", "yesterdya", "--dry-run", "echo"], &fx.source);
+    assert!(!ok);
+    assert!(err.contains("did you mean `yesterday`"), "{err}");
+}

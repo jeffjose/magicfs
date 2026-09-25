@@ -354,7 +354,7 @@ pub fn suggest<'a>(word: &str, entries: &'a [Entry]) -> Option<&'a Entry> {
 
 /// Edit distance counting a swapped pair of neighbours as one slip — the
 /// commonest typo there is (`cta.png`).
-fn distance(a: &str, b: &str) -> usize {
+pub(crate) fn distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (n, m) = (a.len(), b.len());

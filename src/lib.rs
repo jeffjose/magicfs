@@ -24,6 +24,7 @@ pub mod seen;
 pub mod shellinit;
 pub mod spec;
 pub mod view;
+pub mod when;
 
 #[cfg(test)]
 mod testutil;

@@ -65,6 +65,7 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
             spec.filter.clear();
             spec.exclude.clear();
             spec.unseen = false;
+            spec.when = None;
             spec.limit = None;
             Ok(())
         }),

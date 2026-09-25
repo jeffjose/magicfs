@@ -95,6 +95,7 @@ pub fn arrange(mut entries: Vec<Entry>, spec: &ViewSpec) -> Result<Vec<Entry>> {
     if let Some(set) = build_globset(&spec.exclude, spec.case_sensitive)? {
         entries.retain(|e| !matches(&set, e, &spec.exclude));
     }
+    crate::when::retain(&mut entries, spec)?;
 
     sort_entries(&mut entries, spec);
 
