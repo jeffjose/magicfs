@@ -925,7 +925,7 @@ fn sessions(args: SpecArgs) -> Result<()> {
 
     let plan = build_plan(&source, &spec)?;
     let stamps: Vec<crate::when::Secs> =
-        plan.iter().map(|n| crate::when::stamp(&n.entry)).collect();
+        plan.iter().map(|n| crate::when::stamp(&n.entry, &spec)).collect();
     let gap = crate::when::gap();
     let found = crate::when::sessions(&stamps, gap);
     if found.is_empty() {

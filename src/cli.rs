@@ -248,7 +248,7 @@ impl Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Reorder the current view: name, natural, time, ctime, atime, size, ext, random.
+    /// Reorder the current view: name, natural, time, created, ctime, atime, size, ext, random.
     Sort {
         key: String,
         #[arg(short, long)]
@@ -340,7 +340,7 @@ pub enum Command {
 /// Ordering/filtering options, shared by the root command and by `exec`/`paths`.
 #[derive(Args, Clone, Debug, Default)]
 pub struct SpecArgs {
-    /// Ordering: name, natural, time, ctime, atime, size, ext, random.
+    /// Ordering: name, natural, time, created, ctime, atime, size, ext, random.
     #[arg(short = 's', long, value_name = "KEY")]
     pub sort: Option<String>,
 
@@ -364,6 +364,11 @@ pub struct SpecArgs {
     /// mon..wed, 14:00..16:30. `all` clears it.
     #[arg(short = 'w', long, value_name = "WINDOW")]
     pub when: Option<String>,
+
+    /// Go by when files were created, not last written, for --when and
+    /// sessions. Falls back to the write time where the filesystem has none.
+    #[arg(long)]
+    pub created: bool,
 
     /// Newest first, and only the newest unless -n says how many.
     #[arg(long, conflicts_with_all = ["sort", "oldest"])]
@@ -409,6 +414,7 @@ impl SpecArgs {
             && self.limit.is_none()
             && !self.unseen
             && self.when.is_none()
+            && !self.created
             && !self.latest
             && !self.oldest
             && !self.recursive
@@ -457,6 +463,9 @@ impl SpecArgs {
         }
         if self.unseen {
             spec.unseen = true;
+        }
+        if self.created {
+            spec.created = true;
         }
         if let Some(when) = &self.when {
             spec.when = match when.as_str() {

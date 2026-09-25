@@ -203,6 +203,15 @@ sessions are `yesterday@0` (the latest) and `yesterday@1` — `magicfs sessions
 found among the files that survive `-f`/`-x`, so `sessions -f png` are the
 bursts of PNGs. `MAGICFS_SESSION_GAP=20m` changes the gap.
 
+### Written or created
+
+Windows and sessions go by when a file was last *written*, which every
+filesystem records and which, for screenshots and renders, is when it was
+made. `--created` goes by creation time instead — the difference shows for a
+file edited later, or one copied in with its old timestamp kept (`cp -p`,
+`rsync -t`, a camera import). ext4, btrfs and xfs record it; elsewhere
+`--created` falls back to the write time. `-s created` sorts by it.
+
 The window is kept as written and re-read whenever the view is rebuilt, so a
 view of `today` is still today's files after midnight. `-w all` or `magicfs
 clear` removes it.
@@ -299,7 +308,7 @@ clean` remove links only.
 | --- | --- |
 | `magicfs [DIR] [OPTS]` | Open a view of `DIR` (default: the current directory), or reconfigure the one you're in |
 | `magicfs [OPTS] CMD...` | ...and run `CMD` in it — see [Running a command](#running-a-command) |
-| `magicfs sort KEY` | `name`, `natural`, `time`, `ctime`, `atime`, `size`, `ext`, `random` |
+| `magicfs sort KEY` | `name`, `natural`, `time`, `created`, `ctime`, `atime`, `size`, `ext`, `random` |
 | `magicfs reverse` | Flip the current order |
 | `magicfs filter PAT...` | Restrict the view; no args clears |
 | `magicfs exclude PAT...` | Drop matching entries |
@@ -329,7 +338,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 ### Options
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
-`-w/--when` `--latest` `--oldest`
+`-w/--when` `--created` `--latest` `--oldest`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
 `--links` `-y/--yes`
@@ -433,5 +442,5 @@ shell's cwd makes every later command fail on `getcwd`.
 
 ```sh
 cargo build --release      # target/release/magicfs
-cargo test                 # 131 tests
+cargo test                 # 163 tests
 ```

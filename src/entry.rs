@@ -27,6 +27,8 @@ pub struct Entry {
     pub mtime: i128,
     pub ctime: i128,
     pub atime: i128,
+    /// Creation time, where the filesystem records one (ext4, btrfs, xfs do).
+    pub btime: Option<i128>,
     pub is_dir: bool,
 }
 
@@ -48,6 +50,11 @@ impl Entry {
             mtime: md.mtime() as i128 * 1_000_000_000 + md.mtime_nsec() as i128,
             ctime: md.ctime() as i128 * 1_000_000_000 + md.ctime_nsec() as i128,
             atime: md.atime() as i128 * 1_000_000_000 + md.atime_nsec() as i128,
+            btime: md
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i128),
             path,
             rel,
             name,

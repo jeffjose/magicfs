@@ -120,7 +120,7 @@ impl Window {
 pub fn retain(entries: &mut Vec<Entry>, spec: &ViewSpec) -> Result<()> {
     let Some(text) = &spec.when else { return Ok(()) };
     let window = Window::parse(text, now())?;
-    let stamps: Vec<Secs> = entries.iter().map(stamp).collect();
+    let stamps: Vec<Secs> = entries.iter().map(|e| stamp(e, spec)).collect();
     let mut keep = window.select(&stamps, gap()).into_iter();
     entries.retain(|_| keep.next().unwrap_or(false));
     Ok(())
@@ -154,9 +154,11 @@ pub fn gap() -> Secs {
         .unwrap_or(DEFAULT_GAP)
 }
 
-/// The moment a file counts as "from": when it was last written.
-pub fn stamp(entry: &Entry) -> Secs {
-    entry.mtime.div_euclid(1_000_000_000) as Secs
+/// The moment a file counts as "from": when it was last written, or with
+/// `--created`, when it was made — where the filesystem remembers.
+pub fn stamp(entry: &Entry, spec: &ViewSpec) -> Secs {
+    let nanos = if spec.created { entry.btime.unwrap_or(entry.mtime) } else { entry.mtime };
+    nanos.div_euclid(1_000_000_000) as Secs
 }
 
 pub fn now() -> Secs {

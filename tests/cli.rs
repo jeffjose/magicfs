@@ -866,3 +866,18 @@ fn sessions_are_listed_and_picked_by_number() {
     assert!(ok);
     assert_eq!(out, "echo 001-yday-am.png");
 }
+
+#[test]
+fn created_goes_by_when_a_file_was_made_not_last_written() {
+    let fx = Fixture::new("created");
+    // Made just now, but stamped as written in 2020 — a copied-in photo.
+    fx.photo("copied.png", "2020-01-01");
+    if std::fs::metadata(fx.source.join("copied.png")).unwrap().created().is_err() {
+        return; // this filesystem keeps no creation time
+    }
+    let (_, _, ok) = fx.run(&["-w", "today", "--dry-run", "echo"], &fx.source);
+    assert!(!ok, "by write time it is from 2020");
+    let (out, err, ok) = fx.run(&["-w", "today", "--created", "--dry-run", "echo"], &fx.source);
+    assert!(ok, "{err}");
+    assert_eq!(out, "echo 001-copied.png");
+}

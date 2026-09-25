@@ -124,6 +124,7 @@ fn compare(a: &Entry, b: &Entry, spec: &ViewSpec) -> Ordering {
         SortKey::Time => a.mtime.cmp(&b.mtime),
         SortKey::Ctime => a.ctime.cmp(&b.ctime),
         SortKey::Atime => a.atime.cmp(&b.atime),
+        SortKey::Created => a.btime.unwrap_or(a.mtime).cmp(&b.btime.unwrap_or(b.mtime)),
         SortKey::Size => a.size.cmp(&b.size),
         SortKey::Ext => a
             .ext

@@ -28,6 +28,8 @@ pub enum SortKey {
     Ctime,
     /// Access time.
     Atime,
+    /// Creation time, falling back to mtime where there is none.
+    Created,
     Size,
     /// Group by extension, then by name within each extension.
     Ext,
@@ -43,12 +45,13 @@ impl SortKey {
             "time" | "mtime" | "modified" | "date" | "t" => SortKey::Time,
             "ctime" | "changed" => SortKey::Ctime,
             "atime" | "accessed" | "used" => SortKey::Atime,
+            "created" | "btime" | "birth" | "born" => SortKey::Created,
             "size" | "s" | "bytes" => SortKey::Size,
             "ext" | "extension" | "type" | "kind" => SortKey::Ext,
             "random" | "rand" | "shuffle" | "r" => SortKey::Random,
             other => bail!(
                 "unknown sort key `{other}`\n\
-                 valid keys: name, natural, time, ctime, atime, size, ext, random"
+                 valid keys: name, natural, time, created, ctime, atime, size, ext, random"
             ),
         })
     }
@@ -60,6 +63,7 @@ impl SortKey {
             SortKey::Time => "time",
             SortKey::Ctime => "ctime",
             SortKey::Atime => "atime",
+            SortKey::Created => "created",
             SortKey::Size => "size",
             SortKey::Ext => "ext",
             SortKey::Random => "random",
@@ -69,7 +73,10 @@ impl SortKey {
     /// Sort keys where "biggest first" is the intuitive default, so that
     /// `magicfs sort time` shows newest-first without needing `--reverse`.
     pub fn descends_by_default(self) -> bool {
-        matches!(self, SortKey::Time | SortKey::Ctime | SortKey::Atime | SortKey::Size)
+        matches!(
+            self,
+            SortKey::Time | SortKey::Created | SortKey::Ctime | SortKey::Atime | SortKey::Size
+        )
     }
 }
 
@@ -124,6 +131,9 @@ pub struct ViewSpec {
     /// written and re-read on every rebuild, so `today` stays today.
     #[serde(default)]
     pub when: Option<String>,
+    /// Read `when` and sessions by creation time rather than modification.
+    #[serde(default)]
+    pub created: bool,
     /// Keep only the first N entries *after* ordering.
     pub limit: Option<usize>,
     /// Flatten the whole subtree into one directory.
@@ -147,6 +157,7 @@ impl Default for ViewSpec {
             exclude: Vec::new(),
             unseen: false,
             when: None,
+            created: false,
             limit: None,
             recursive: false,
             dirs: DirMode::default(),
@@ -185,7 +196,8 @@ impl ViewSpec {
             parts.push(format!("exclude {}", self.exclude.join(",")));
         }
         if let Some(when) = &self.when {
-            parts.push(format!("when {when}"));
+            let by = if self.created { " (created)" } else { "" };
+            parts.push(format!("when {when}{by}"));
         }
         if self.unseen {
             parts.push("unseen".to_string());
