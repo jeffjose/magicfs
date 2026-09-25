@@ -101,6 +101,27 @@ pub fn select(
     source: &Path,
     entries: &[Entry],
 ) -> Result<Invocation> {
+    select_with(words, source, entries, Options { has_program, ..Default::default() })
+}
+
+/// How [`select_with`] reads a command line.
+#[derive(Default)]
+pub struct Options {
+    /// The first word is the command to run, never one of its own arguments.
+    pub has_program: bool,
+    /// Match quoted patterns case-sensitively. Off by default, the same as
+    /// `-f`, so `'*cat*'` catches `Cat.PNG`.
+    pub case_sensitive: bool,
+}
+
+/// [`select`], with the knobs spelled out.
+pub fn select_with(
+    words: &[String],
+    source: &Path,
+    entries: &[Entry],
+    opts: Options,
+) -> Result<Invocation> {
+    let has_program = opts.has_program;
     let mut argv = Vec::new();
     let mut chosen = Vec::new();
     let mut seen = HashSet::new();
@@ -119,7 +140,7 @@ pub fn select(
             vec![rel]
         } else if is_pattern(word) {
             // Quoted, so the shell left it alone: expand it ourselves.
-            let hits = matching(word, entries)?;
+            let hits = matching(word, entries, opts.case_sensitive)?;
             if hits.is_empty() {
                 bail!("nothing in {} matches `{word}`", source.display());
             }
@@ -172,9 +193,10 @@ fn resolve(
 }
 
 /// Entries a still-unexpanded glob would have matched.
-fn matching(pattern: &str, entries: &[Entry]) -> Result<Vec<String>> {
+fn matching(pattern: &str, entries: &[Entry], case_sensitive: bool) -> Result<Vec<String>> {
     let glob = globset::GlobBuilder::new(pattern)
         .literal_separator(true)
+        .case_insensitive(!case_sensitive)
         .build()
         .with_context(|| format!("`{pattern}` is not a valid pattern"))?
         .compile_matcher();
@@ -198,7 +220,7 @@ pub fn is_shell_line(word: &str) -> bool {
 
 /// A word the shell would have expanded had it not been quoted.
 fn is_pattern(word: &str) -> bool {
-    word.contains(['*', '?', '['])
+    word.contains(['*', '?', '[', '{'])
 }
 
 fn is_flag(word: &str) -> bool {
@@ -318,6 +340,31 @@ mod tests {
         let (td, entries) = fixture("invoke-nomatch");
         let err = select(&words(&["smplayer", "*.flac"]), true, td.path(), &entries).unwrap_err();
         assert!(err.to_string().contains("*.flac"), "got: {err}");
+    }
+
+    #[test]
+    fn a_quoted_pattern_ignores_case_like_the_filters_do() {
+        let td = TempDir::new("invoke-case");
+        td.touch("cat-1.png");
+        td.touch("Cat-2.PNG");
+        td.touch("dog.png");
+        let entries = scan(td.path(), &ViewSpec::default()).unwrap();
+
+        let inv = select(&words(&["feh", "*CAT*.png"]), true, td.path(), &entries).unwrap();
+        let mut chosen = inv.chosen.clone();
+        chosen.sort();
+        assert_eq!(chosen, words(&["Cat-2.PNG", "cat-1.png"]));
+
+        let opts = Options { has_program: true, case_sensitive: true };
+        let err = select_with(&words(&["feh", "*CAT*.png"]), td.path(), &entries, opts);
+        assert!(err.is_err(), "--case-sensitive must still be honoured");
+    }
+
+    #[test]
+    fn a_quoted_brace_pattern_is_expanded_too() {
+        let (td, entries) = fixture("invoke-brace");
+        let inv = select(&words(&["feh", "*.{txt,flac}"]), true, td.path(), &entries).unwrap();
+        assert_eq!(inv.chosen, words(&["c.txt"]));
     }
 
     #[test]

@@ -168,7 +168,8 @@ fn serve(
         None
     } else {
         let entries = scan(&view.source, &view.spec)?;
-        let picked = invoke::select(&words, has_program, &view.source, &entries)?;
+        let opts = invoke::Options { has_program, case_sensitive: view.spec.case_sensitive };
+        let picked = invoke::select_with(&words, &view.source, &entries, opts)?;
         // Naming no files at all means the whole view, which is also what the
         // view already is — so don't wipe a narrowing an earlier command set.
         if !picked.chosen.is_empty() {

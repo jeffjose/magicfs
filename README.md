@@ -90,6 +90,11 @@ Quoting sidesteps the guesswork entirely, and lands in the same place:
 directory here, and `mfr 'mpv --loop *'` — one quoted argument, a whole command
 line — is handed to a shell *inside* the view, which expands the glob there.
 
+A quoted pattern ignores case, the same as `-f` (`--case-sensitive` turns that
+off), and takes braces: `mfr feh '*cat*.{png,jpg}'` finds `Cat-2.PNG` too. In
+tcsh and zsh, an unquoted glob that matches nothing stops the shell before
+magicfs runs ("No match."), so quote the ones you aren't sure of.
+
 Words that name nothing are none of our business (`/backup` above, or a `--flag`
 that belongs to the tool). The command replaces magicfs, so it owns the terminal
 and its exit status is the one you get; `--dry-run` prints the line instead.
