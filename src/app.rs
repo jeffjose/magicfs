@@ -77,6 +77,7 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
+        Some(Command::Sessions { spec }) => sessions(spec),
         Some(Command::Seen { files }) => mark_seen(&files),
         Some(Command::Unsee { last, all, files }) => unsee(last, all, &files),
         Some(Command::Demo { count, out }) => demo(count, out, pref),
@@ -905,6 +906,60 @@ fn which(name: &str) -> Result<()> {
     let target = std::fs::read_link(&link)
         .with_context(|| format!("{name} is not an entry in {}", view.root.display()))?;
     println!("{}", target.display());
+    Ok(())
+}
+
+/// `magicfs sessions` — the bursts of work `-w @N` picks from.
+///
+/// `-w` narrows the files first, and then the numbering is local to it: under
+/// `-w yesterday` the list reads `yesterday@0`, `yesterday@1`, which is
+/// exactly what those windows select.
+fn sessions(args: SpecArgs) -> Result<()> {
+    const SHOWN: usize = 20;
+    let shown = args.limit.unwrap_or(SHOWN);
+    let within = args.when.clone();
+    // The view's own window and limit would hide the very sessions this lists.
+    let (source, mut spec) = resolve_source(&SpecArgs { when: None, limit: None, ..args })?;
+    spec.limit = None;
+    spec.when = within.clone();
+
+    let plan = build_plan(&source, &spec)?;
+    let stamps: Vec<crate::when::Secs> =
+        plan.iter().map(|n| crate::when::stamp(&n.entry)).collect();
+    let gap = crate::when::gap();
+    let found = crate::when::sessions(&stamps, gap);
+    if found.is_empty() {
+        bail!("no files in {} [{}]", source.display(), spec.summary());
+    }
+
+    let now = crate::when::now();
+    let prefix = within.as_deref().filter(|w| !w.contains('@')).unwrap_or("");
+    for (i, s) in found.iter().enumerate().take(shown) {
+        let n = s.members.len();
+        let (from, to) = (crate::when::clock_label(s.start), crate::when::clock_label(s.end));
+        // A lone file (or a burst inside one minute) has no length to speak of.
+        let (times, length) = if from == to {
+            (from, String::new())
+        } else {
+            (format!("{from}–{to}"), crate::when::length_label(s.end - s.start))
+        };
+        let line = format!(
+            "{:<14}{:<11}{:<13}{:>5} {:<5}  {length}",
+            format!("{prefix}@{i}"),
+            crate::when::day_label(s.start, now),
+            times,
+            n,
+            if n == 1 { "file" } else { "files" },
+        );
+        println!("{}", line.trim_end());
+    }
+    if found.len() > shown {
+        eprintln!("… and {} older — `-n {}` shows them", found.len() - shown, found.len());
+    }
+    eprintln!(
+        "a quiet stretch over {} starts a new session (MAGICFS_SESSION_GAP)",
+        crate::when::length_label(gap)
+    );
     Ok(())
 }
 

@@ -178,6 +178,30 @@ $ magicfs -w lastweek rm *                # asks first
 | `14:00..16:30` `yesterday.22..2` | clock times on one day (today unless named) |
 | `mon..wed` `09-20..` | whole days, either end open |
 | `mon,wed` | either |
+| `@0` `@1..@3` `yesterday@0` | sessions — see below |
+
+### Sessions
+
+"Yesterday morning's coding session" rarely started at 5am or stopped at noon,
+so the clock can't find it — but the files can. A **session** is a burst of
+files with no quiet stretch over 45 minutes between them, and `magicfs
+sessions` lists them, latest first:
+
+```console
+$ magicfs sessions
+@0            today      10:02–11:40      18 files  1h38m
+@1            yesterday  15:10–17:45      31 files  2h35m
+@2            yesterday  09:00–11:55      40 files  2h55m
+@3            Tue 09-22  21:30             1 file
+$ magicfs -w @2 -s time feh *             # yesterday morning's, in order
+$ magicfs -w @0..@1 rm *                  # the last two, after asking
+```
+
+Under `-w`, the numbering starts again inside the window, so yesterday's
+sessions are `yesterday@0` (the latest) and `yesterday@1` — `magicfs sessions
+-w yesterday` lists them that way, and `-w yesterday@1` picks one. Sessions are
+found among the files that survive `-f`/`-x`, so `sessions -f png` are the
+bursts of PNGs. `MAGICFS_SESSION_GAP=20m` changes the gap.
 
 The window is kept as written and re-read whenever the view is rebuilt, so a
 view of `today` is still today's files after midnight. `-w all` or `magicfs
@@ -288,6 +312,7 @@ clean` remove links only.
 | `magicfs exec CMD...` | Run CMD with the ordered files as arguments |
 | `magicfs paths [-0]` | Print the ordered real paths |
 | `magicfs which NAME` | Real path behind a view entry |
+| `magicfs sessions [-w WINDOW]` | List the bursts of work, for `-w @N` |
 | `magicfs seen [FILE...]` | Mark files seen; with none, report the count |
 | `magicfs unsee --last\|--all\|FILE...` | Make files count as new again |
 | `magicfs shell-init SHELL` | Emit the auto-cd wrapper |

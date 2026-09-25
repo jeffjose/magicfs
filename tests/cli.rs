@@ -841,3 +841,28 @@ fn a_misspelt_window_is_refused_before_anything_runs() {
     assert!(!ok);
     assert!(err.contains("did you mean `yesterday`"), "{err}");
 }
+
+#[test]
+fn sessions_are_listed_and_picked_by_number() {
+    let fx = days_fixture("sessions");
+    fx.photo("yday-pm2.png", "yesterday 15:20");
+    let (out, err, ok) = fx.run(&["sessions"], &fx.source);
+    assert!(ok, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "{out}");
+    assert!(lines[0].starts_with("@0") && lines[0].contains("today"), "{out}");
+    assert!(lines[1].contains("yesterday") && lines[1].contains("15:00–15:20"), "{out}");
+    assert!(lines[1].contains("2 files"), "{out}");
+
+    let (out, _, ok) = fx.run(&["-s", "time", "-w", "@1", "--dry-run", "echo"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, "echo 001-yday-pm2.png 002-yday-pm.png");
+
+    // Within a day, the numbering starts again.
+    let (out, _, ok) = fx.run(&["sessions", "-w", "yesterday"], &fx.source);
+    assert!(ok);
+    assert!(out.lines().nth(1).unwrap().starts_with("yesterday@1"), "{out}");
+    let (out, _, ok) = fx.run(&["-w", "yesterday@1", "--dry-run", "echo"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, "echo 001-yday-am.png");
+}

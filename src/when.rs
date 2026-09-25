@@ -4,6 +4,12 @@
 //! `3h`, `mon..wed`, `14:00..16:30` — and is re-read against the clock every
 //! time the view is rebuilt, so a view of `today` is still today tomorrow.
 //!
+//! A *session* is a burst of work: files written with no gap longer than
+//! [`DEFAULT_GAP`] between them. `@0` is the latest, `@1` the one before, and
+//! `yesterday@0` the latest of yesterday's — "this morning's coding session"
+//! rarely starts at 5am or stops at noon, so the clock can't find it, but the
+//! files can.
+//!
 //! Everything is local time: "yesterday" means the one on your wall, which is
 //! the only one anybody means. The calendar arithmetic is left to the C
 //! library's `mktime`, which already knows the timezone and its DST rules, and
@@ -28,6 +34,20 @@ pub struct Window {
 enum Clause {
     /// Files stamped in `[start, end)`.
     Span(Secs, Secs),
+    /// Sessions `from..=to`, counted back from the latest, among the files in
+    /// `within` (all of them when `None`).
+    Sessions { within: Option<(Secs, Secs)>, from: usize, to: usize },
+}
+
+/// A quiet stretch longer than this ends a session.
+pub const DEFAULT_GAP: Secs = 45 * 60;
+
+/// One burst of work, as positions in the list it was found in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub start: Secs,
+    pub end: Secs,
+    pub members: Vec<usize>,
 }
 
 /// Parts of the day. Night runs past midnight and belongs to the evening it
@@ -69,11 +89,30 @@ impl Window {
         Ok(Window { clauses })
     }
 
-    /// Whether a timestamp falls inside the window.
-    fn contains(&self, t: Secs) -> bool {
-        self.clauses.iter().any(|c| match *c {
-            Clause::Span(start, end) => start <= t && t < end,
-        })
+    /// Which of `stamps` fall inside the window.
+    fn select(&self, stamps: &[Secs], gap: Secs) -> Vec<bool> {
+        let mut keep = vec![false; stamps.len()];
+        for clause in &self.clauses {
+            match *clause {
+                Clause::Span(start, end) => {
+                    for (k, &t) in keep.iter_mut().zip(stamps) {
+                        *k |= start <= t && t < end;
+                    }
+                }
+                Clause::Sessions { within, from, to } => {
+                    let inside: Vec<usize> = (0..stamps.len())
+                        .filter(|&i| within.is_none_or(|(a, b)| a <= stamps[i] && stamps[i] < b))
+                        .collect();
+                    let picked: Vec<Secs> = inside.iter().map(|&i| stamps[i]).collect();
+                    for session in sessions(&picked, gap).iter().skip(from).take(to - from + 1) {
+                        for &m in &session.members {
+                            keep[inside[m]] = true;
+                        }
+                    }
+                }
+            }
+        }
+        keep
     }
 }
 
@@ -81,8 +120,38 @@ impl Window {
 pub fn retain(entries: &mut Vec<Entry>, spec: &ViewSpec) -> Result<()> {
     let Some(text) = &spec.when else { return Ok(()) };
     let window = Window::parse(text, now())?;
-    entries.retain(|e| window.contains(stamp(e)));
+    let stamps: Vec<Secs> = entries.iter().map(stamp).collect();
+    let mut keep = window.select(&stamps, gap()).into_iter();
+    entries.retain(|_| keep.next().unwrap_or(false));
     Ok(())
+}
+
+/// Group timestamps into sessions, latest first.
+pub fn sessions(stamps: &[Secs], gap: Secs) -> Vec<Session> {
+    let mut order: Vec<usize> = (0..stamps.len()).collect();
+    order.sort_by_key(|&i| stamps[i]);
+    let mut out: Vec<Session> = Vec::new();
+    for i in order {
+        let t = stamps[i];
+        match out.last_mut() {
+            Some(s) if t - s.end <= gap => {
+                s.end = t;
+                s.members.push(i);
+            }
+            _ => out.push(Session { start: t, end: t, members: vec![i] }),
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// The session gap: `MAGICFS_SESSION_GAP` (`30m`, `2h`), or [`DEFAULT_GAP`].
+pub fn gap() -> Secs {
+    std::env::var("MAGICFS_SESSION_GAP")
+        .ok()
+        .and_then(|g| duration(g.trim()))
+        .filter(|&g| g > 0)
+        .unwrap_or(DEFAULT_GAP)
 }
 
 /// The moment a file counts as "from": when it was last written.
@@ -98,6 +167,9 @@ pub fn now() -> Secs {
 }
 
 fn clause(text: &str, now: Secs) -> Result<Clause> {
+    if text.contains('@') {
+        return sessions_clause(text, now);
+    }
     if let Some((a, b)) = text.split_once("..") {
         return range(a, b, now);
     }
@@ -106,6 +178,55 @@ fn clause(text: &str, now: Secs) -> Result<Clause> {
     }
     let (start, end) = span(text, now)?;
     Ok(Clause::Span(start, end))
+}
+
+/// How a moment reads in a listing: `today`, `yesterday`, `Mon 09-21`, or a
+/// full date once it is more than a week back.
+pub fn day_label(t: Secs, now: Secs) -> String {
+    let midnight = day_start(t, 0);
+    let tm = local(t);
+    if midnight == day_start(now, 0) {
+        "today".to_string()
+    } else if midnight == day_start(now, 1) {
+        "yesterday".to_string()
+    } else if midnight > day_start(now, 7) {
+        const NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        format!("{} {:02}-{:02}", NAMES[tm.tm_wday as usize], tm.tm_mon + 1, tm.tm_mday)
+    } else {
+        format!("{}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    }
+}
+
+/// `14:05`, local time.
+pub fn clock_label(t: Secs) -> String {
+    let tm = local(t);
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// `1h08m`, `40m`, `3d`.
+pub fn length_label(secs: Secs) -> String {
+    let m = secs / 60;
+    match m {
+        0..60 => format!("{m}m"),
+        60..1440 => format!("{}h{:02}m", m / 60, m % 60),
+        _ => format!("{}d", m / 1440),
+    }
+}
+
+/// `@1`, `@0..@2`, `yesterday@0`, `week@1..@3`.
+fn sessions_clause(text: &str, now: Secs) -> Result<Clause> {
+    let (a, b) = text.split_once("..").unwrap_or((text, text));
+    let Some((prefix, from)) = a.split_once('@') else {
+        bail!("`{text}`: a session range is written `@0..@2`");
+    };
+    let to = b.rsplit_once('@').map_or(b, |(_, n)| n);
+    let number = |n: &str| {
+        n.parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("`{text}`: sessions are numbered @0 (the latest), @1, ..."))
+    };
+    let (from, to) = (number(from)?, number(to)?);
+    let within = if prefix.is_empty() { None } else { Some(span(prefix, now)?) };
+    Ok(Clause::Sessions { within, from: from.min(to), to: from.max(to) })
 }
 
 /// `a..b`: clock times on one day, or from the start of one day to the end
@@ -293,7 +414,10 @@ mod tests {
             .unwrap()
             .clauses
             .into_iter()
-            .map(|Clause::Span(a, b)| (a, b))
+            .map(|c| match c {
+                Clause::Span(a, b) => (a, b),
+                other => panic!("not a span: {other:?}"),
+            })
             .collect()
     }
 
@@ -363,13 +487,55 @@ mod tests {
         assert_eq!(when(one("2026-01-05").0), (1, 5, 0, 0));
     }
 
+    fn kept(text: &str, stamps: &[Secs]) -> Vec<bool> {
+        Window::parse(text, thursday_3pm()).unwrap().select(stamps, DEFAULT_GAP)
+    }
+
     #[test]
     fn commas_are_a_union() {
         assert_eq!(spans("mon,wed").len(), 2);
-        let w = Window::parse("mon,wed", thursday_3pm()).unwrap();
-        assert!(w.contains(make(126, 8, 21, 10, 0)));
-        assert!(!w.contains(make(126, 8, 22, 10, 0)), "tuesday");
-        assert!(w.contains(make(126, 8, 23, 10, 0)));
+        let (mon, tue, wed) =
+            (make(126, 8, 21, 10, 0), make(126, 8, 22, 10, 0), make(126, 8, 23, 10, 0));
+        assert_eq!(kept("mon,wed", &[mon, tue, wed]), [true, false, true]);
+    }
+
+    /// Yesterday 9:00–9:30 and 14:00–14:20, and today 10:00–10:40, in
+    /// scrambled order.
+    fn working_day() -> Vec<Secs> {
+        let y = |h, m| make(126, 8, 23, h, m);
+        let t = |h, m| make(126, 8, 24, h, m);
+        vec![t(10, 40), y(9, 0), y(14, 20), t(10, 0), y(9, 30), y(14, 0), t(10, 20)]
+    }
+
+    #[test]
+    fn sessions_are_split_by_quiet_stretches_latest_first() {
+        let stamps = working_day();
+        let found = sessions(&stamps, DEFAULT_GAP);
+        let sizes: Vec<usize> = found.iter().map(|s| s.members.len()).collect();
+        assert_eq!(sizes, [3, 2, 2]);
+        assert_eq!(when(found[0].start), (9, 24, 10, 0));
+        assert_eq!(when(found[0].end), (9, 24, 10, 40));
+        assert_eq!(when(found[2].start), (9, 23, 9, 0));
+        // A longer gap merges yesterday's two.
+        assert_eq!(sessions(&stamps, 6 * 3600).len(), 2);
+    }
+
+    #[test]
+    fn sessions_are_picked_by_number() {
+        let stamps = working_day();
+        assert_eq!(kept("@0", &stamps), [true, false, false, true, false, false, true]);
+        assert_eq!(kept("@2", &stamps), [false, true, false, false, true, false, false]);
+        assert_eq!(kept("@1..@2", &stamps), [false, true, true, false, true, true, false]);
+        assert_eq!(kept("@9", &stamps), [false; 7], "no such session is simply nothing");
+    }
+
+    #[test]
+    fn a_day_numbers_its_own_sessions() {
+        let stamps = working_day();
+        // Yesterday's latest is the afternoon one, the morning the one before.
+        assert_eq!(kept("yesterday@1", &stamps), kept("@2", &stamps));
+        assert_eq!(kept("yesterday@0", &stamps), kept("@1", &stamps));
+        assert!(Window::parse("@x", thursday_3pm()).is_err());
     }
 
     #[test]

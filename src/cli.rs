@@ -302,6 +302,11 @@ pub enum Command {
     },
     /// Print the real path behind a view entry.
     Which { name: String },
+    /// List the bursts of work in the directory, newest first, for `-w @N`.
+    Sessions {
+        #[command(flatten)]
+        spec: SpecArgs,
+    },
     /// Mark files as seen, so `--unseen` skips them. No files: report what's seen.
     Seen { files: Vec<String> },
     /// Make files count as unseen again.
