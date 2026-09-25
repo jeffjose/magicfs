@@ -30,8 +30,9 @@ replaced with the view's, in order:
 
 Words that name no file are left alone, so `magicfs -s time -n 3 cp * /backup`
 still copies to /backup. File tools (rm, mv, cp, ...) get the real paths,
-not the view's names, and anything that deletes asks first (-y skips it). A single quoted argument is handed to a shell
-inside the view instead: magicfs -s random 'mpv --loop *'.
+not the view's names, and anything that deletes asks first (-y skips it).
+A single quoted argument is handed to a shell inside the view instead:
+magicfs -s random 'mpv --loop *'.
 
 At a terminal, a command that lands somewhere moves you there — via the
 `shell-init` wrapper if you installed one, otherwise by starting a subshell
