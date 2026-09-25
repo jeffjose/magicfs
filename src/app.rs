@@ -168,8 +168,16 @@ fn serve(
         None
     } else {
         let entries = scan(&view.source, &view.spec)?;
-        let opts = invoke::Options { has_program, case_sensitive: view.spec.case_sensitive };
+        let opts = invoke::Options {
+            has_program,
+            case_sensitive: view.spec.case_sensitive,
+            correct: corrector(),
+        };
         let picked = invoke::select_with(&words, &view.source, &entries, opts)?;
+        // With no command, every word was meant as a file.
+        if !has_program && let Some(stray) = picked.argv.first() {
+            return Err(not_a_file(stray, &view.source, &entries));
+        }
         // Naming no files at all means the whole view, which is also what the
         // view already is — so don't wipe a narrowing an earlier command set.
         if !picked.chosen.is_empty() {
@@ -216,6 +224,44 @@ fn serve(
             standing,
             dry_run,
         ),
+    }
+}
+
+/// Ask before correcting a typo, tcsh-style — but only when someone is there
+/// to answer. A script gets its words exactly as written.
+fn corrector() -> Option<invoke::Corrector> {
+    let tty = unsafe {
+        libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDERR_FILENO) == 1
+    };
+    if !tty {
+        return None;
+    }
+    Some(Box::new(|typed: &str, meant: &str| {
+        loop {
+            eprint!("CORRECT>{meant} (y|n|a)? ");
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line)? == 0 {
+                return Ok(invoke::Fix::Abort);
+            }
+            match line.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" | "" => return Ok(invoke::Fix::Yes),
+                "n" | "no" => return Ok(invoke::Fix::No),
+                "a" | "abort" | "q" => return Ok(invoke::Fix::Abort),
+                _ => eprintln!("  y: use {meant}   n: keep {typed}   a: abort"),
+            }
+        }
+    }))
+}
+
+/// "No such file", with the likeliest file named when there is one.
+fn not_a_file(word: &str, source: &Path, entries: &[Entry]) -> anyhow::Error {
+    match invoke::suggest(word, entries) {
+        Some(near) => anyhow::anyhow!(
+            "`{word}` is not a file in {} — did you mean `{}`?",
+            source.display(),
+            near.name
+        ),
+        None => anyhow::anyhow!("`{word}` is not a file in {}", source.display()),
     }
 }
 
@@ -813,9 +859,10 @@ fn seen_scope() -> Result<(PathBuf, Vec<Entry>)> {
 /// The entries these words name. Every word has to name one: a typo in
 /// `magicfs unsee` must not quietly do nothing.
 fn named<'a>(files: &[String], source: &Path, entries: &'a [Entry]) -> Result<Vec<&'a Entry>> {
-    let picked = invoke::select(files, false, source, entries)?;
+    let opts = invoke::Options { correct: corrector(), ..Default::default() };
+    let picked = invoke::select_with(files, source, entries, opts)?;
     if let Some(stray) = picked.argv.first() {
-        bail!("`{stray}` is not a file in {}", source.display());
+        return Err(not_a_file(stray, source, entries));
     }
     // `select` reports naming every file as naming none in particular.
     if picked.chosen.is_empty() {

@@ -95,6 +95,20 @@ off), and takes braces: `mfr feh '*cat*.{png,jpg}'` finds `Cat-2.PNG` too. In
 tcsh and zsh, an unquoted glob that matches nothing stops the shell before
 magicfs runs ("No match."), so quote the ones you aren't sure of.
 
+A file name one slip away from a real one is offered back, the way tcsh's
+`set correct` does:
+
+```console
+$ mfr feh bat.png
+CORRECT>cat.png (y|n|a)?
+```
+
+`y` (or Enter) uses it, `n` keeps what you typed, `a` stops. Only words that
+look like file names are considered — never `/backup`, `--loop` or `50` — and
+when two files are equally close nothing is guessed. Away from a terminal
+nothing is asked, and a file-only command line fails with `did you mean
+cat.png?` instead.
+
 Words that name nothing are none of our business (`/backup` above, or a `--flag`
 that belongs to the tool). The command replaces magicfs, so it owns the terminal
 and its exit status is the one you get; `--dry-run` prints the line instead.

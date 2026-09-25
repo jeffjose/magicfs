@@ -61,6 +61,11 @@ fn tail(words: &[String]) -> Ask {
         [one] if is_shell_line(one) => Ask::Run(words.to_vec()),
         [first, ..] if is_program(first) => Ask::Run(words.to_vec()),
         _ if words.iter().all(|w| names_files(w)) => Ask::Pick(words.to_vec()),
+        // `magicfs bat.png` when the file is `cat.png`: a typo for a file, not
+        // a program — so it gets corrected rather than failing to exec.
+        _ if words.iter().all(|w| names_files(w) || looks_like_file(w)) => {
+            Ask::Pick(words.to_vec())
+        }
         // Nothing else fits: treat it as a command and let the exec fail with a
         // message naming the program, which is what the user typed.
         _ => Ask::Run(words.to_vec()),
@@ -104,6 +109,20 @@ pub fn select(
     select_with(words, source, entries, Options { has_program, ..Default::default() })
 }
 
+/// The answer to "did you mean `cat.png`?".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fix {
+    /// Use the suggestion.
+    Yes,
+    /// Keep the word as typed — it was never meant to be a file here.
+    No,
+    /// Stop: the command line is wrong and nothing should run.
+    Abort,
+}
+
+/// Asked with the word as typed and the entry name it is probably a typo for.
+pub type Corrector = Box<dyn FnMut(&str, &str) -> Result<Fix>>;
+
 /// How [`select_with`] reads a command line.
 #[derive(Default)]
 pub struct Options {
@@ -112,6 +131,9 @@ pub struct Options {
     /// Match quoted patterns case-sensitively. Off by default, the same as
     /// `-f`, so `'*cat*'` catches `Cat.PNG`.
     pub case_sensitive: bool,
+    /// Offer to correct a word that is one slip away from a file, the way
+    /// tcsh's `set correct` does. `None` leaves such words alone.
+    pub correct: Option<Corrector>,
 }
 
 /// [`select`], with the knobs spelled out.
@@ -119,7 +141,7 @@ pub fn select_with(
     words: &[String],
     source: &Path,
     entries: &[Entry],
-    opts: Options,
+    mut opts: Options,
 ) -> Result<Invocation> {
     let has_program = opts.has_program;
     let mut argv = Vec::new();
@@ -145,6 +167,17 @@ pub fn select_with(
                 bail!("nothing in {} matches `{word}`", source.display());
             }
             hits
+        } else if let Some(fix) = opts.correct.as_mut()
+            && let Some(near) = suggest(word, entries)
+        {
+            match fix(word, &near.name)? {
+                Fix::Yes => vec![near.rel.clone()],
+                Fix::No => {
+                    argv.push(word.clone());
+                    continue;
+                }
+                Fix::Abort => bail!("aborted"),
+            }
         } else {
             // A destination path, a numeric option value, a URL: not ours.
             argv.push(word.clone());
@@ -206,6 +239,85 @@ fn matching(pattern: &str, entries: &[Entry], case_sensitive: bool) -> Result<Ve
         .filter(|e| glob.is_match(e.name.as_str()) || (scoped && glob.is_match(e.rel.as_str())))
         .map(|e| e.rel.clone())
         .collect())
+}
+
+/// The entry a mistyped word most likely meant, if there is exactly one.
+///
+/// Only words that look like a file name and name nothing are considered —
+/// `/backup`, `--loop`, `50` and `https://...` are never "corrected" into a
+/// file. The bar is a couple of slipped keys, scaled to the length of the name,
+/// and a tie means we can't tell which one you meant, so we don't guess.
+pub fn suggest<'a>(word: &str, entries: &'a [Entry]) -> Option<&'a Entry> {
+    if word.contains('/') || is_flag(word) || is_pattern(word) || Path::new(word).exists() {
+        return None;
+    }
+    let len = word.chars().count();
+    let fileish = word.char_indices().any(|(i, c)| c == '.' && i > 0);
+    if !fileish && len < 4 {
+        return None;
+    }
+    let limit = match len {
+        0..=4 => 1,
+        5..=10 => 2,
+        _ => 3,
+    };
+    // Without an extension, only a single slip: a bare word is as likely to be
+    // an argument for the tool as a misspelt file.
+    let limit = if fileish { limit } else { 1 };
+
+    let typed = word.to_lowercase();
+    let mut best: Option<(usize, &Entry)> = None;
+    let mut tied = false;
+    for entry in entries {
+        let d = distance(&typed, &entry.name.to_lowercase());
+        if d > limit {
+            continue;
+        }
+        match best {
+            Some((b, _)) if d > b => {}
+            Some((b, _)) if d == b => tied = true,
+            _ => {
+                best = Some((d, entry));
+                tied = false;
+            }
+        }
+    }
+    if tied { None } else { best.map(|(_, e)| e) }
+}
+
+/// Edit distance counting a swapped pair of neighbours as one slip — the
+/// commonest typo there is (`cta.png`).
+fn distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n.abs_diff(m) > 3 {
+        return usize::MAX;
+    }
+    let mut d = vec![vec![0usize; m + 1]; n + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=m {
+        d[0][j] = j;
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[n][m]
+}
+
+/// A word that reads as a file name rather than a program: `bat.png`.
+fn looks_like_file(word: &str) -> bool {
+    !word.contains(char::is_whitespace)
+        && !is_flag(word)
+        && word.char_indices().any(|(i, c)| c == '.' && i > 0)
 }
 
 /// A single argument that is a whole command *line* rather than a program name
@@ -355,7 +467,7 @@ mod tests {
         chosen.sort();
         assert_eq!(chosen, words(&["Cat-2.PNG", "cat-1.png"]));
 
-        let opts = Options { has_program: true, case_sensitive: true };
+        let opts = Options { has_program: true, case_sensitive: true, ..Default::default() };
         let err = select_with(&words(&["feh", "*CAT*.png"]), td.path(), &entries, opts);
         assert!(err.is_err(), "--case-sensitive must still be honoured");
     }
@@ -365,6 +477,92 @@ mod tests {
         let (td, entries) = fixture("invoke-brace");
         let inv = select(&words(&["feh", "*.{txt,flac}"]), true, td.path(), &entries).unwrap();
         assert_eq!(inv.chosen, words(&["c.txt"]));
+    }
+
+    fn typo_fixture(label: &str) -> (TempDir, Vec<Entry>) {
+        let td = TempDir::new(label);
+        td.touch("cat.png");
+        td.touch("holiday-2024.jpg");
+        td.touch("notes.txt");
+        let entries = scan(td.path(), &ViewSpec::default()).unwrap();
+        (td, entries)
+    }
+
+    fn near<'a>(word: &str, entries: &'a [Entry]) -> Option<&'a str> {
+        suggest(word, entries).map(|e| e.name.as_str())
+    }
+
+    #[test]
+    fn a_slipped_key_is_matched_to_the_file_it_meant() {
+        let (_td, entries) = typo_fixture("invoke-suggest");
+        assert_eq!(near("bat.png", &entries), Some("cat.png"));
+        assert_eq!(near("cta.png", &entries), Some("cat.png"), "a swap is one slip");
+        assert_eq!(near("CAT.PNG", &entries), Some("cat.png"));
+        assert_eq!(near("holday-2042.jpg", &entries), Some("holiday-2024.jpg"));
+    }
+
+    #[test]
+    fn words_that_are_not_file_names_are_never_corrected() {
+        let (_td, entries) = typo_fixture("invoke-nosuggest");
+        for word in ["/backup", "--loop", "50", "dog.gif", "https://cat.png", "*.pnh", "note"] {
+            assert_eq!(near(word, &entries), None, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_tie_is_not_guessed_at() {
+        let td = TempDir::new("invoke-tie");
+        td.touch("cat.png");
+        td.touch("hat.png");
+        let entries = scan(td.path(), &ViewSpec::default()).unwrap();
+        assert_eq!(near("bat.png", &entries), None);
+    }
+
+    #[test]
+    fn an_accepted_correction_selects_the_file() {
+        let (td, entries) = typo_fixture("invoke-correct");
+        let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = asked.clone();
+        let opts = Options {
+            has_program: true,
+            correct: Some(Box::new(move |typed: &str, meant: &str| {
+                log.borrow_mut().push((typed.to_string(), meant.to_string()));
+                Ok(Fix::Yes)
+            })),
+            ..Default::default()
+        };
+        let inv = select_with(&words(&["feh", "bat.png"]), td.path(), &entries, opts).unwrap();
+        assert_eq!(inv.chosen, words(&["cat.png"]));
+        assert_eq!(inv.argv, words(&["feh"]));
+        assert_eq!(*asked.borrow(), vec![("bat.png".to_string(), "cat.png".to_string())]);
+    }
+
+    #[test]
+    fn a_declined_correction_leaves_the_word_alone() {
+        let (td, entries) = typo_fixture("invoke-decline");
+        let opts = Options {
+            has_program: true,
+            correct: Some(Box::new(|_: &str, _: &str| Ok(Fix::No))),
+            ..Default::default()
+        };
+        let inv = select_with(&words(&["feh", "bat.png"]), td.path(), &entries, opts).unwrap();
+        assert_eq!(inv.argv, words(&["feh", "bat.png"]));
+        assert!(inv.chosen.is_empty());
+
+        let opts = Options {
+            has_program: true,
+            correct: Some(Box::new(|_: &str, _: &str| Ok(Fix::Abort))),
+            ..Default::default()
+        };
+        assert!(select_with(&words(&["feh", "bat.png"]), td.path(), &entries, opts).is_err());
+    }
+
+    #[test]
+    fn a_misspelt_file_alone_is_a_pick_not_a_program() {
+        assert_eq!(
+            interpret(&words(&["no-such-file.png"])),
+            (None, Ask::Pick(words(&["no-such-file.png"])))
+        );
     }
 
     #[test]

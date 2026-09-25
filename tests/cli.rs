@@ -734,3 +734,16 @@ fn unsee_refuses_a_name_that_is_not_a_file() {
     assert!(!ok);
     assert!(err.contains("nope.mp4"), "got: {err}");
 }
+
+#[test]
+fn a_misspelt_file_is_named_back_with_what_it_probably_meant() {
+    // Not at a terminal, so nothing is asked — but the error says what to type.
+    let fx = chronological_fixture("typo-pick");
+    let (_, err, ok) = fx.run(&["--no-cd", "bbc.jpg"], &fx.source);
+    assert!(!ok);
+    assert!(err.contains("did you mean `bbb.jpg`"), "got: {err}");
+
+    let (_, err, ok) = fx.run(&["unsee", "ddd.pgn"], &fx.source);
+    assert!(!ok);
+    assert!(err.contains("did you mean `ddd.png`"), "got: {err}");
+}
