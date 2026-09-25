@@ -305,7 +305,8 @@ fn arguments_that_name_no_file_are_left_where_they_were() {
     // `cp * /backup` must not copy /backup into itself, nor lose it.
     let fx = chronological_fixture("run-dest");
     let names = expanded(&fx);
-    let mut args = vec!["-s", "time", "--dry-run", "cp"];
+    // --links, so the names show the order; `cp` would get real paths.
+    let mut args = vec!["-s", "time", "--dry-run", "--links", "cp"];
     args.extend(names.iter().map(String::as_str));
     args.push("/backup");
 
@@ -315,6 +316,57 @@ fn arguments_that_name_no_file_are_left_where_they_were() {
         out,
         "cp 001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png /backup"
     );
+}
+
+#[test]
+fn file_tools_are_handed_the_real_files() {
+    // A view name would have `rm` delete the link and leave the file.
+    let fx = chronological_fixture("real-rm");
+    let (out, _, ok) = fx.run(&["-s", "time", "-n", "2", "--dry-run", "rm", "-v"], &fx.source);
+    assert!(ok);
+    let src = fx.source.display();
+    assert_eq!(out, format!("rm -v {src}/aaa.jpg {src}/bbb.jpg"));
+}
+
+#[test]
+fn rm_deletes_the_real_files_and_builds_no_view() {
+    let fx = chronological_fixture("real-rm-run");
+    let names = expanded(&fx);
+    let mut args = vec!["-s", "time", "-n", "1", "rm"];
+    args.extend(names.iter().map(String::as_str));
+    // Not at a terminal, so nothing is asked.
+    let (_, err, ok) = fx.run(&args, &fx.source);
+    assert!(ok, "{err}");
+    assert!(!fx.source.join("aaa.jpg").exists(), "the newest file is gone");
+    assert!(fx.source.join("bbb.jpg").exists(), "and only that one");
+    assert_eq!(std::fs::read_dir(&fx.base).unwrap().count(), 0, "no view left behind");
+}
+
+#[test]
+fn rm_from_inside_a_view_tidies_the_view() {
+    let fx = chronological_fixture("real-rm-inside");
+    let (view, _, ok) = fx.run(&["--no-cd", "-s", "time"], &fx.source);
+    assert!(ok);
+    let view = PathBuf::from(view);
+    let (_, err, ok) = fx.run(&["rm", "001-aaa.jpg"], &view);
+    assert!(ok, "{err}");
+    assert!(!fx.source.join("aaa.jpg").exists());
+    assert_eq!(
+        fx.glob(&view),
+        ["001-bbb.jpg", "002-ccc.jpg", "003-ddd.png", "004-eee.png"],
+        "no broken link where the file was"
+    );
+}
+
+#[test]
+fn a_destination_that_is_in_the_directory_stays_the_destination() {
+    // `cp * sub/` expands to `... sub sub/`, and sub/ is where they go.
+    let fx = chronological_fixture("real-cp-sub");
+    std::fs::create_dir(fx.source.join("sub")).unwrap();
+    let (out, _, ok) =
+        fx.run(&["--dry-run", "--dirs", "exclude", "cp", "aaa.jpg", "sub/"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, format!("cp {}/aaa.jpg sub/", fx.source.display()));
 }
 
 #[test]

@@ -28,8 +28,9 @@ replaced with the view's, in order:
   magicfs -s random feh -Z *.png  the flag is kept, the PNGs alone are used
   magicfs -s time *.jpg           no command: a view of just the JPEGs
 
-Words that name no file are left alone, so `magicfs -s random cp * /backup`
-still copies to /backup. A single quoted argument is handed to a shell
+Words that name no file are left alone, so `magicfs -s time -n 3 cp * /backup`
+still copies to /backup. File tools (rm, mv, cp, ...) get the real paths,
+not the view's names, and anything that deletes asks first (-y skips it). A single quoted argument is handed to a shell
 inside the view instead: magicfs -s random 'mpv --loop *'.
 
 At a terminal, a command that lands somewhere moves you there — via the
@@ -75,6 +76,18 @@ pub struct Cli {
     /// Print the command that would run instead of running it.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Hand the command real paths, as `rm`, `mv` and `cp` get anyway.
+    #[arg(long, conflicts_with = "links")]
+    pub real: bool,
+
+    /// Hand the command the view's names, even if it is `cp` or `tar`.
+    #[arg(long)]
+    pub links: bool,
+
+    /// Don't ask before `rm` and the like.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 
     /// Open a second view instead of reconfiguring the one you're in.
     ///

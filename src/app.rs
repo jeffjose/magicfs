@@ -25,7 +25,12 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
     match cli.command {
         None => {
             let (source, ask) = invoke::interpret(rest);
-            root(source, cli.spec, cli.out, pref, new, ask, cli.dry_run)
+            let run = RunFlags {
+                dry_run: cli.dry_run,
+                real: if cli.real { Some(true) } else if cli.links { Some(false) } else { None },
+                yes: cli.yes,
+            };
+            root(source, cli.spec, cli.out, pref, new, ask, run)
         }
         Some(Command::Sort { key, reverse }) => reconfigure(
             pref,
@@ -92,6 +97,16 @@ pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
     Ok(render(arrange(entries, spec)?, spec))
 }
 
+/// How to run a trailing command, beyond which files it gets.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunFlags {
+    dry_run: bool,
+    /// `--real` / `--links`; `None` decides by what the program is.
+    real: Option<bool>,
+    /// Skip the confirmation before `rm` and the like.
+    yes: bool,
+}
+
 /// `magicfs [SOURCE] [OPTIONS] [COMMAND...]` — create a view, or reconfigure
 /// the one we're standing in, and optionally run something in it.
 ///
@@ -104,14 +119,14 @@ fn root(
     pref: CdPref,
     new: bool,
     ask: Ask,
-    dry_run: bool,
+    run: RunFlags,
 ) -> Result<()> {
     // Inside a view with no explicit source: this is a reconfiguration, not a
     // request to build a view *of the view*.
     if source.is_none() && out.is_none() && !new
         && let Some(view) = view::current()? {
             if ask != Ask::View {
-                return serve(view, args, ask, pref, Standing::Inside, dry_run);
+                return serve(view, args, ask, pref, Standing::Inside, run);
             }
             let root = if args.is_empty() {
                 report(&view)?
@@ -130,7 +145,7 @@ fn root(
         (None, None) => open_view(None, out)?,
     };
     if ask != Ask::View {
-        return serve(view, args, ask, pref, Standing::Outside, dry_run);
+        return serve(view, args, ask, pref, Standing::Outside, run);
     }
     let root = apply_to_view(view, args, pref, Standing::Outside)?;
     land(&root, pref, Standing::Outside)
@@ -149,8 +164,10 @@ fn serve(
     ask: Ask,
     pref: CdPref,
     standing: Standing,
-    dry_run: bool,
+    run: RunFlags,
 ) -> Result<()> {
+    let dry_run = run.dry_run;
+    let before = view.spec.clone();
     args.apply_to(&mut view.spec)?;
 
     let (words, has_program) = match &ask {
@@ -163,6 +180,14 @@ fn serve(
     // "leave this alone": hand it to a shell in the view and let *that* expand
     // the glob, which lands in the same place with none of the guesswork.
     let shell_line = has_program && words.len() == 1 && invoke::is_shell_line(&words[0]);
+    let mut handling = if has_program && !shell_line {
+        invoke::handling(&words)
+    } else {
+        invoke::Handling { real: false, destructive: false, dest_last: false }
+    };
+    if let Some(real) = run.real {
+        handling.real = real;
+    }
 
     let invocation = if shell_line {
         None
@@ -172,6 +197,7 @@ fn serve(
             has_program,
             case_sensitive: view.spec.case_sensitive,
             correct: corrector(),
+            keep_last: handling.dest_last,
         };
         let picked = invoke::select_with(&words, &view.source, &entries, opts)?;
         // With no command, every word was meant as a file.
@@ -191,6 +217,11 @@ fn serve(
         // Never fall back to "naming nothing means everything" here: with
         // --unseen that would replay every file you have already watched.
         return Err(nothing_new(&view, standing)?);
+    }
+    if handling.real
+        && let Some(invocation) = invocation
+    {
+        return manage(view, before, invocation, &plan, handling, standing, run);
     }
     links::apply(&view, &plan)?;
     view.save()?;
@@ -225,6 +256,81 @@ fn serve(
             dry_run,
         ),
     }
+}
+
+/// Run a file-managing command — `rm`, `mv`, `cp` — on the real files.
+///
+/// Nothing about it wants a view. The files have to be the real ones (a view
+/// name would have `rm` delete a link and `cp` make a copy called
+/// `001-cat.png`), and it runs where you typed it, so `cp * backup/` means the
+/// `backup/` next to you rather than one inside the view. So no view is
+/// built, the shell doesn't move, and when standing in a view it is tidied
+/// up afterwards so the files that went away don't linger as broken links.
+fn manage(
+    view: View,
+    before: ViewSpec,
+    invocation: invoke::Invocation,
+    plan: &[Named],
+    handling: invoke::Handling,
+    standing: Standing,
+    run: RunFlags,
+) -> Result<()> {
+    // Only a view made for this command is removed; one you are standing in
+    // (or an `--out` directory with things in it) is left alone.
+    if standing == Standing::Outside {
+        let _ = std::fs::remove_dir(&view.root);
+    }
+    let files = plan.iter().map(|n| n.entry.path.to_string_lossy().into_owned());
+    let argv = invocation.with_files(files);
+
+    if run.dry_run {
+        println!("{}", shown(&argv));
+        return Ok(());
+    }
+    if handling.destructive && !run.yes && !confirm(&argv[0], &view, plan)? {
+        bail!("nothing done");
+    }
+
+    let (program, rest) = argv.split_first().expect("a command has a program");
+    let status = std::process::Command::new(program)
+        .args(rest)
+        .status()
+        .with_context(|| format!("cannot run `{program}`"))?;
+
+    if standing == Standing::Inside {
+        let refreshed = View { spec: before, ..view };
+        let plan = build_plan(&refreshed.source, &refreshed.spec)?;
+        links::apply(&refreshed, &plan)?;
+    }
+    use std::os::unix::process::ExitStatusExt;
+    std::process::exit(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
+}
+
+/// "rm 31 files from ~/renders?" — the list is computed (a time window, a
+/// glob, `-n`), so it is the one thing you haven't looked at yet.
+///
+/// Away from a terminal there is nobody to ask, so it goes ahead: a script
+/// that says `rm` means it.
+fn confirm(program: &str, view: &View, plan: &[Named]) -> Result<bool> {
+    let tty = unsafe {
+        libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDERR_FILENO) == 1
+    };
+    if !tty {
+        return Ok(true);
+    }
+    const SHOWN: usize = 10;
+    let noun = if plan.len() == 1 { "file" } else { "files" };
+    eprintln!("{program} {} {noun} in {}:", plan.len(), view.source.display());
+    for named in plan.iter().take(SHOWN) {
+        eprintln!("  {}", named.entry.rel);
+    }
+    if plan.len() > SHOWN {
+        eprintln!("  … and {} more", plan.len() - SHOWN);
+    }
+    eprint!("proceed? [y/N] ");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Ask before correcting a typo, tcsh-style — but only when someone is there
@@ -280,18 +386,7 @@ fn launch(
 ) -> Result<()> {
     let (program, rest) = argv.split_first().expect("a command has a program");
     if dry_run {
-        // Quoted where it matters, so the printed line is one you could paste.
-        let shown: Vec<String> = argv
-            .iter()
-            .map(|w| {
-                if w.contains(char::is_whitespace) {
-                    format!("'{w}'")
-                } else {
-                    w.clone()
-                }
-            })
-            .collect();
-        println!("{}", shown.join(" "));
+        println!("{}", shown(&argv));
         return Ok(());
     }
     if pref != CdPref::Never && standing == Standing::Outside {
@@ -308,6 +403,15 @@ fn launch(
         .env("MAGICFS_VIEW", &view.root)
         .exec();
     Err(err).with_context(|| format!("cannot run `{program}`"))
+}
+
+/// A command line quoted where it matters, so the printed line is one you
+/// could paste.
+fn shown(argv: &[String]) -> String {
+    argv.iter()
+        .map(|w| if w.contains(char::is_whitespace) { format!("'{w}'") } else { w.clone() })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_argv(line: &str) -> Vec<String> {

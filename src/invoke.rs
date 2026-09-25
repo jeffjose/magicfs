@@ -134,6 +134,9 @@ pub struct Options {
     /// Offer to correct a word that is one slip away from a file, the way
     /// tcsh's `set correct` does. `None` leaves such words alone.
     pub correct: Option<Corrector>,
+    /// The last word is a destination even when it names an entry:
+    /// `cp * sub/` must copy into `sub`, not copy `sub` too.
+    pub keep_last: bool,
 }
 
 /// [`select`], with the knobs spelled out.
@@ -150,10 +153,11 @@ pub fn select_with(
     let mut at = None;
     let mut canon = None;
 
+    let last = words.len().checked_sub(1).filter(|&l| opts.keep_last && l > 1);
     for (i, word) in words.iter().enumerate() {
         // The command's own flags are none of our business — `--loop` means
         // something to mpv and nothing to us, so it survives untouched.
-        if (i == 0 && has_program) || is_flag(word) {
+        if (i == 0 && has_program) || is_flag(word) || Some(i) == last {
             argv.push(word.clone());
             continue;
         }
@@ -239,6 +243,69 @@ fn matching(pattern: &str, entries: &[Entry], case_sensitive: bool) -> Result<Ve
         .filter(|e| glob.is_match(e.name.as_str()) || (scoped && glob.is_match(e.rel.as_str())))
         .map(|e| e.rel.clone())
         .collect())
+}
+
+/// What a program does with the files it is handed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handling {
+    /// It acts on the files themselves (`rm`, `mv`, `cp`), so it needs their
+    /// real paths: handed a view name, `rm` deletes the link and `cp` makes a
+    /// copy called `001-cat.png`.
+    pub real: bool,
+    /// It destroys what it is given, so ask first.
+    pub destructive: bool,
+    /// Its last argument is where things go, not one of the things.
+    pub dest_last: bool,
+}
+
+/// Programs that manage files rather than show them. Anything not listed is a
+/// viewer and gets the view's names, in order.
+const FILE_TOOLS: &[(&str, bool, bool)] = &[
+    // (name, destructive, dest_last)
+    ("rm", true, false),
+    ("rmdir", true, false),
+    ("unlink", true, false),
+    ("shred", true, false),
+    ("trash", true, false),
+    ("trash-put", true, false),
+    // `gio trash`/`gio remove`; `gio open` is a viewer — see `handling`.
+    ("gio", false, false),
+    ("mv", false, true),
+    ("cp", false, true),
+    ("ln", false, true),
+    ("rsync", false, true),
+    ("scp", false, true),
+    ("install", false, true),
+    ("chmod", false, false),
+    ("chown", false, false),
+    ("chgrp", false, false),
+    ("touch", false, false),
+    ("tar", false, false),
+    ("zip", false, false),
+    ("7z", false, false),
+    ("du", false, false),
+    ("stat", false, false),
+    ("file", false, false),
+    ("realpath", false, false),
+    ("readlink", false, false),
+];
+
+/// How the command line `words` should be handed its files.
+pub fn handling(words: &[String]) -> Handling {
+    let viewer = Handling { real: false, destructive: false, dest_last: false };
+    let Some(program) = words.first() else { return viewer };
+    let name = Path::new(program).file_name().and_then(|n| n.to_str()).unwrap_or(program);
+    if name == "gio" {
+        return match words.get(1).map(String::as_str) {
+            Some("trash" | "remove" | "rm") => Handling { real: true, destructive: true, dest_last: false },
+            Some("move" | "mv" | "copy" | "cp") => Handling { real: true, destructive: false, dest_last: true },
+            _ => viewer,
+        };
+    }
+    match FILE_TOOLS.iter().find(|(n, ..)| *n == name) {
+        Some(&(_, destructive, dest_last)) => Handling { real: true, destructive, dest_last },
+        None => viewer,
+    }
 }
 
 /// The entry a mistyped word most likely meant, if there is exactly one.
@@ -563,6 +630,32 @@ mod tests {
             interpret(&words(&["no-such-file.png"])),
             (None, Ask::Pick(words(&["no-such-file.png"])))
         );
+    }
+
+    #[test]
+    fn file_tools_want_real_paths_and_viewers_do_not() {
+        let h = |line: &[&str]| handling(&words(line));
+        assert!(h(&["rm", "-f"]).real && h(&["rm"]).destructive);
+        assert!(h(&["/bin/rm"]).destructive, "a full path is the same program");
+        assert!(h(&["mv"]).real && h(&["mv"]).dest_last && !h(&["mv"]).destructive);
+        assert!(h(&["gio", "trash"]).destructive);
+        assert!(!h(&["gio", "open"]).real);
+        assert!(!h(&["feh"]).real);
+        assert!(!h(&["mpv"]).dest_last);
+    }
+
+    #[test]
+    fn a_destination_that_is_also_an_entry_stays_the_destination() {
+        // `cp * sub/` expands to `cp a.mp4 b.mp4 sub sub/`.
+        let td = TempDir::new("invoke-dest");
+        td.touch("a.mp4");
+        td.mkdir("sub");
+        let entries = scan(td.path(), &ViewSpec::default()).unwrap();
+        let opts = Options { has_program: true, keep_last: true, ..Default::default() };
+        let inv =
+            select_with(&words(&["cp", "a.mp4", "sub"]), td.path(), &entries, opts).unwrap();
+        assert_eq!(inv.argv, words(&["cp", "sub"]));
+        assert_eq!(inv.chosen, words(&["a.mp4"]));
     }
 
     #[test]

@@ -82,7 +82,7 @@ they came from. Everything else is left exactly where it was:
 | `mfr smplayer *` | `smplayer 001-c.mp4 002-a.mp4 003-b.mp4` |
 | `mfr smplayer --fullscreen *` | `smplayer --fullscreen 001-c.mp4 ...` — the flag is kept |
 | `mfr smplayer *.mp4` | only the mp4s, and the view holds only them |
-| `mfr cp * /backup` | `cp 001-c.mp4 ... /backup` — the destination stays last |
+| `mfr cp * /backup` | `cp ~/v/c.mp4 ... /backup` — real files, the destination stays last |
 | `mfr mpv` | the whole view, in order — naming no files means all of them |
 
 Quoting sidesteps the guesswork entirely, and lands in the same place:
@@ -112,6 +112,32 @@ cat.png?` instead.
 Words that name nothing are none of our business (`/backup` above, or a `--flag`
 that belongs to the tool). The command replaces magicfs, so it owns the terminal
 and its exit status is the one you get; `--dry-run` prints the line instead.
+
+### Commands that manage files
+
+`rm`, `mv`, `cp`, `ln`, `rsync`, `chmod`, `touch`, `tar`, `zip`, `trash`,
+`gio trash` and the like are handed the **real paths**, not the view's names —
+a view name is a symlink, so `rm 001-cat.png` would delete the link and leave
+the file, and `cp` would make a copy called `001-cat.png`. They run where you
+typed them, so `cp * backup/` means the `backup/` next to you, and they build
+no view and don't move you:
+
+```console
+$ magicfs -s time -n 1 rm *            # delete the newest file
+rm 1 file in ~/renders:
+  final-v3.mp4
+proceed? [y/N]
+```
+
+Anything that deletes asks first, listing what it is about to remove — the
+selection was computed, so this is the first time you see it. `-y` skips the
+question, `--dry-run` prints the command instead, and away from a terminal
+nothing is asked. Run from inside a view, the view is tidied afterwards so a
+deleted file doesn't linger as a broken link.
+
+For a destination that is itself in the directory (`cp * sub/`), the last word
+stays the destination. `--real` hands any other command real paths, and
+`--links` hands even `cp` the view's names.
 
 Files with no command at all are just a narrower view:
 
@@ -241,7 +267,8 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
-`--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run`
+`--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
+`--links` `-y/--yes`
 
 Filter patterns accept a bare extension (`png`), a class (`images`, `raw`,
 `video`, `audio`, `docs`, `archives`), or a glob (`'IMG_*'`, `'2024/*'`).
