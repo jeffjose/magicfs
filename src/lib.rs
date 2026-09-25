@@ -12,6 +12,7 @@
 //! (`magicfs exec` / `magicfs paths`), the original filenames are preserved,
 //! because argv order is not re-sorted by anything.
 
+pub mod aliases;
 pub mod app;
 pub mod cli;
 pub mod demo;

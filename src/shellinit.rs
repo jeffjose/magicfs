@@ -6,19 +6,24 @@
 //! Going through a file rather than stdout keeps the tool's normal output
 //! usable and works identically in shells with no command substitution
 //! niceties (tcsh).
+//!
+//! The wrapper also dumps the shell's aliases into `MAGICFS_ALIASES`, so a
+//! command run in the view can be one of them — see [`crate::aliases`].
 
 use anyhow::{Result, bail};
 
 const BASH: &str = r#"
 magicfs() {
-  local _mfs_file _mfs_rc
+  local _mfs_file _mfs_alias _mfs_rc
   _mfs_file="$(mktemp -t magicfs-cd.XXXXXX)" || return 1
-  MAGICFS_CD_FILE="$_mfs_file" command magicfs "$@"
+  _mfs_alias="$(mktemp -t magicfs-alias.XXXXXX)" || return 1
+  alias > "$_mfs_alias"
+  MAGICFS_CD_FILE="$_mfs_file" MAGICFS_ALIASES="$_mfs_alias" command magicfs "$@"
   _mfs_rc=$?
   if [ -s "$_mfs_file" ]; then
     cd "$(cat "$_mfs_file")" || _mfs_rc=$?
   fi
-  rm -f "$_mfs_file"
+  rm -f "$_mfs_file" "$_mfs_alias"
   return $_mfs_rc
 }
 "#;
@@ -40,7 +45,7 @@ end
 // statements. `\!*` forwards the arguments; the parenthesised subshell keeps
 // the setenv from leaking into the interactive shell.
 const TCSH: &str = r#"
-alias magicfs 'set _mfs_file=`mktemp -t magicfs-cd.XXXXXX`; ( setenv MAGICFS_CD_FILE "$_mfs_file" ; \magicfs \!* ) ; if ( -s "$_mfs_file" ) cd "`cat $_mfs_file`" ; rm -f "$_mfs_file" ; unset _mfs_file'
+alias magicfs 'set _mfs_file=`mktemp -t magicfs-cd.XXXXXX`; set _mfs_alias=`mktemp -t magicfs-alias.XXXXXX`; alias >! "$_mfs_alias"; ( setenv MAGICFS_CD_FILE "$_mfs_file" ; setenv MAGICFS_ALIASES "$_mfs_alias" ; \magicfs \!* ) ; if ( -s "$_mfs_file" ) cd "`cat $_mfs_file`" ; rm -f "$_mfs_file" "$_mfs_alias" ; unset _mfs_file _mfs_alias'
 "#;
 
 /// The wrapper source for `shell`, or for `$SHELL` when it is `None`.
@@ -97,6 +102,13 @@ mod tests {
         assert!(BASH.contains("command magicfs"));
         assert!(FISH.contains("command magicfs"));
         assert!(TCSH.contains(r"\magicfs"));
+    }
+
+    #[test]
+    fn bash_and_tcsh_wrappers_hand_over_their_aliases() {
+        for body in [BASH, TCSH] {
+            assert!(body.contains("MAGICFS_ALIASES"));
+        }
     }
 
     #[test]

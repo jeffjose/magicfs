@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::aliases::{Aliases, Expanded};
 use crate::cli::{Cli, Command, CdPref, SpecArgs};
 use crate::entry::{Entry, scan};
 use crate::invoke::{self, Ask};
@@ -172,7 +173,7 @@ fn serve(
     let before = view.spec.clone();
     args.apply_to(&mut view.spec)?;
 
-    let (words, has_program) = match &ask {
+    let (mut words, has_program) = match &ask {
         Ask::Run(words) => (words.clone(), true),
         Ask::Pick(words) => (words.clone(), false),
         Ask::View => unreachable!("serve is only called with something to do"),
@@ -182,7 +183,27 @@ fn serve(
     // "leave this alone": hand it to a shell in the view and let *that* expand
     // the glob, which lands in the same place with none of the guesswork.
     let shell_line = has_program && words.len() == 1 && invoke::is_shell_line(&words[0]);
-    let mut handling = if has_program && !shell_line {
+
+    // `ll *` means what it means at your prompt. A plain alias is expanded
+    // here, so `del *` (`rm -rf`) is still recognised as deleting; one only
+    // the shell can run is run by it, with your definitions.
+    let mut via_shell: Option<Aliases> = None;
+    if has_program {
+        let first = words[0].split_whitespace().next().unwrap_or("").to_string();
+        if let Some(table) = aliases_for(&first) {
+            if shell_line {
+                via_shell = Some(table);
+            } else {
+                match table.expand(&words) {
+                    Some(Expanded::Words(expanded)) => words = expanded,
+                    Some(Expanded::Shell) => via_shell = Some(table),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    let mut handling = if has_program && !shell_line && via_shell.is_none() {
         invoke::handling(&words)
     } else {
         invoke::Handling { real: false, destructive: false, dest_last: false }
@@ -219,6 +240,28 @@ fn serve(
         // Never fall back to "naming nothing means everything" here: with
         // --unseen that would replay every file you have already watched.
         return Err(nothing_new(&view, standing)?);
+    }
+    if let Some(table) = via_shell {
+        let line = match invocation {
+            None => words[0].clone(),
+            Some(invocation) => {
+                let files = plan.iter().map(|n| {
+                    if handling.real {
+                        n.entry.path.to_string_lossy().into_owned()
+                    } else {
+                        n.name.clone()
+                    }
+                });
+                table.line(&invocation.with_files(files))
+            }
+        };
+        links::apply(&view, &plan)?;
+        view.save()?;
+        if dry_run {
+            println!("{line}");
+            return Ok(());
+        }
+        return launch(&view, table.command(&line), pref, standing, false);
     }
     if handling.real
         && let Some(invocation) = invocation
@@ -258,6 +301,24 @@ fn serve(
             dry_run,
         ),
     }
+}
+
+/// Your aliases, when `word` is one of them.
+///
+/// With the `shell-init` wrapper the table arrives with every call and costs
+/// nothing, so it is always consulted — an alias shadows a program of the same
+/// name, as at your prompt. Without it, finding the table means starting a
+/// shell to read your rc file, which is only worth doing for a word that is
+/// not a program at all.
+fn aliases_for(word: &str) -> Option<Aliases> {
+    if word.is_empty() {
+        return None;
+    }
+    let cheap = std::env::var_os("MAGICFS_ALIASES").is_some();
+    if !cheap && invoke::is_program(word) {
+        return None;
+    }
+    Aliases::load().filter(|t| t.contains(word))
 }
 
 /// Run a file-managing command — `rm`, `mv`, `cp` — on the real files.
@@ -404,6 +465,12 @@ fn launch(
         .args(rest)
         .env("MAGICFS_VIEW", &view.root)
         .exec();
+    if err.kind() == std::io::ErrorKind::NotFound {
+        bail!(
+            "cannot run `{program}`: it is not a program in your PATH, nor an alias \
+             magicfs could find (`magicfs shell-init` hands it your aliases)"
+        );
+    }
     Err(err).with_context(|| format!("cannot run `{program}`"))
 }
 

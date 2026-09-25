@@ -419,7 +419,7 @@ fn is_dir(word: &str) -> bool {
 /// This is the test that separates `mfr mpv *` from `mfr *`: consulting PATH is
 /// exactly what the shell would do with the same word, so the answer matches
 /// the user's own reading of what they typed.
-fn is_program(word: &str) -> bool {
+pub fn is_program(word: &str) -> bool {
     if word.contains('/') {
         return is_executable(Path::new(word));
     }

@@ -113,6 +113,25 @@ Words that name nothing are none of our business (`/backup` above, or a `--flag`
 that belongs to the tool). The command replaces magicfs, so it owns the terminal
 and its exit status is the one you get; `--dry-run` prints the line instead.
 
+### Aliases
+
+The command can be one of your shell aliases — `magicfs -s time ll *`, or just
+`magicfs -s time 'myalias'` — and it means what it means at your prompt:
+
+- A plain alias (`ll` → `ls -lGh`, `del` → `rm -rf`) is expanded by magicfs,
+  following aliases of aliases and tcsh's `\!*`. So `del *` is still `rm`: it
+  gets real paths and asks first.
+- Anything only a shell can run — a pipe, `;`, `$var` — is handed to your shell
+  along with your alias definitions, and runs in the view.
+
+With the `shell-init` wrapper installed, your aliases come with every call, as
+they are at that moment, and an alias beats a program of the same name, as it
+does at your prompt. Without the wrapper, magicfs has to start a shell to read
+your rc file (for tcsh, `~/.cshrc` is sourced with `prompt` set, so an `if ( !
+$?prompt ) exit` guard doesn't skip the aliases). That takes a moment, so it
+happens only when the command isn't a program in your `PATH` at all.
+`MAGICFS_ALIASES=off` turns alias lookup off.
+
 ### Commands that manage files
 
 `rm`, `mv`, `cp`, `ln`, `rsync`, `chmod`, `touch`, `tar`, `zip`, `trash`,
@@ -442,5 +461,5 @@ shell's cwd makes every later command fail on `getcwd`.
 
 ```sh
 cargo build --release      # target/release/magicfs
-cargo test                 # 163 tests
+cargo test                 # 175 tests
 ```

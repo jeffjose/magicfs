@@ -44,6 +44,11 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str], cwd: &Path) -> (String, String, bool) {
+        // Never read the real user's rc files.
+        self.run_env(args, cwd, &[("MAGICFS_ALIASES", "off")])
+    }
+
+    fn run_env(&self, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (String, String, bool) {
         let out = Command::new(env!("CARGO_BIN_EXE_magicfs"))
             .args(args)
             .current_dir(cwd)
@@ -51,6 +56,7 @@ impl Fixture {
             .env("MAGICFS_REGISTRY", &self.registry)
             .env("MAGICFS_SEEN_DIR", self.dir.join("seen"))
             .env_remove("MAGICFS_CD_FILE")
+            .envs(env.iter().copied())
             .output()
             .expect("failed to run magicfs");
         (
@@ -880,4 +886,46 @@ fn created_goes_by_when_a_file_was_made_not_last_written() {
     let (out, err, ok) = fx.run(&["-w", "today", "--created", "--dry-run", "echo"], &fx.source);
     assert!(ok, "{err}");
     assert_eq!(out, "echo 001-copied.png");
+}
+
+/// Run with a tcsh-style alias table, as the shell-init wrapper passes it.
+fn with_aliases(fx: &Fixture, args: &[&str], table: &str) -> (String, String, bool) {
+    let file = fx.dir.join("aliases");
+    std::fs::write(&file, table).unwrap();
+    fx.run_env(args, &fx.source, &[("MAGICFS_ALIASES", file.to_str().unwrap())])
+}
+
+const ALIASES: &str = "e\t(echo -n)\nee\te\ndel\t(rm -rf)\nshout\t(echo !* | tr a-z A-Z)\n";
+
+#[test]
+fn an_alias_runs_as_it_would_at_the_prompt() {
+    let fx = chronological_fixture("alias");
+    let (out, err, ok) =
+        with_aliases(&fx, &["-s", "time", "-n", "2", "--dry-run", "ee"], ALIASES);
+    assert!(ok, "{err}");
+    assert_eq!(out, "echo -n 001-aaa.jpg 002-bbb.jpg", "ee → e → echo -n");
+}
+
+#[test]
+fn an_alias_for_rm_is_still_rm() {
+    let fx = chronological_fixture("alias-rm");
+    let (out, _, ok) =
+        with_aliases(&fx, &["--latest", "--dry-run", "del", "aaa.jpg"], ALIASES);
+    assert!(ok);
+    assert_eq!(out, format!("rm -rf {}/aaa.jpg", fx.source.display()));
+}
+
+#[test]
+fn an_alias_only_the_shell_understands_is_run_by_it() {
+    if Command::new("tcsh").args(["-fc", "true"]).status().is_err() {
+        return;
+    }
+    let fx = chronological_fixture("alias-shell");
+    let (out, _, ok) = with_aliases(&fx, &["--latest", "--dry-run", "shout"], ALIASES);
+    assert!(ok);
+    assert_eq!(out, "shout '001-aaa.jpg'");
+
+    let (out, err, ok) = with_aliases(&fx, &["-s", "time", "-n", "2", "--no-cd", "shout"], ALIASES);
+    assert!(ok, "{err}");
+    assert_eq!(out, "001-AAA.JPG 002-BBB.JPG");
 }
