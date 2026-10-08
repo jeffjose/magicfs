@@ -350,17 +350,24 @@ What is different about a remote directory:
 ## How the view is built
 
 A view is a plain directory of symlinks under `$XDG_RUNTIME_DIR/magicfs/`, named
-after the source with a short random id — `photos-4dk`. No mount, no daemon, no
+after the source, its ordering, and a short random id — `photos-time-desc-4dk`,
+`photos-random-q7f` — so your prompt says what you are looking at. No mount, no daemon, no
 root, nothing to leak (a [remote directory](#over-ssh) is the one exception:
 that is mounted) — and because the kernel resolves a symlink once, reads
 afterwards run at full native speed. Reconfiguring only touches the links that
 actually moved (20,000 files: ~70ms to build, ~150ms to reshuffle).
 
 **Every invocation gets its own view.** Opening `~/photos` twice yields
-`photos-4dk` and `photos-q7f`, and an id is never handed out twice. Reuse would
+`photos-name-asc-4dk` and `photos-name-asc-q7f`, never the same directory. Reuse would
 mean a second terminal silently reordering the directory the first one is
 standing in, and two unrelated directories that happen to share a basename
 would fight over the same name.
+
+Re-sorting a view renames it to match and keeps the id: `magicfs sort size` in
+`photos-time-desc-4dk` leaves you in `photos-size-desc-4dk`. That needs the
+[`shell-init`](#getting-into-the-view) wrapper, which moves your shell along;
+without it the view keeps the name it had, rather than pull the directory out
+from under you. An `--out` directory is yours and is never renamed.
 
 Once you *are* in a view, commands reconfigure it in place — unless you pass
 `--new`, which forks a second view off the current one instead. That is how you

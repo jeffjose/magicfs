@@ -22,6 +22,10 @@ pub struct View {
     /// which is what lets the mount go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<PathBuf>,
+    /// The random part of a root magicfs named itself. `None` for an `--out`
+    /// directory, whose name is the user's and is never changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 impl View {
@@ -46,6 +50,46 @@ impl View {
         // fail the operation the user actually asked for.
         let _ = registry_add(&self.root);
         Ok(())
+    }
+
+    /// Rename the view so its directory says how it is ordered:
+    /// `photos-time-desc-4dk`. The id carries over, so the same view is still
+    /// recognisable after a re-sort.
+    ///
+    /// The new name is claimed by creating it and then renamed over, for the
+    /// same reason as in [`allocate_root`]; a clash just draws a new id.
+    pub fn retitle(&mut self) -> Result<()> {
+        let (Some(mut id), Some(base)) = (self.id.clone(), self.root.parent()) else {
+            return Ok(());
+        };
+        let stem = stem_of(&self.source);
+        let label = self.spec.label();
+        let mut entropy = crate::spec::fresh_seed();
+        for attempt in 0.. {
+            let target = base.join(format!("{stem}-{label}-{id}"));
+            if target == self.root {
+                return Ok(());
+            }
+            match std::fs::create_dir(&target) {
+                Ok(()) => {
+                    std::fs::rename(&self.root, &target).with_context(|| {
+                        format!("renaming {} to {}", self.root.display(), target.display())
+                    })?;
+                    let _ = registry_remove(&self.root);
+                    self.root = target;
+                    self.id = Some(id);
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    entropy = crate::spec::mix64(entropy ^ attempt);
+                    id = id_from(entropy);
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("creating {}", target.display()));
+                }
+            }
+        }
+        unreachable!()
     }
 
     pub fn load(root: &Path) -> Result<View> {
@@ -188,30 +232,35 @@ const ID_LEN: usize = 3;
 /// Choose the directory for a new view over `source`.
 ///
 /// Every call gets its own directory — `~/photos` opened twice yields
-/// `photos-4dk` and `photos-q7f`, never the same one. Reusing a view would
+/// `photos-4dk` and `photos-q7f`, never the same one. The ordering is added to
+/// the name by [`View::retitle`], once there is one. Reusing a view would
 /// mean a second terminal silently reordering the directory the first one is
 /// standing in, and two different directories that happen to share a basename
 /// would fight over the same name.
 ///
 /// The name is claimed by creating it, which is atomic, so two magicfs
 /// processes racing on the same id cannot both win.
-pub fn allocate_root(source: &Path, base: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
+///
+/// Returns the directory and its id — no id for an `explicit` one.
+pub fn allocate_root(
+    source: &Path,
+    base: &Path,
+    explicit: Option<PathBuf>,
+) -> Result<(PathBuf, Option<String>)> {
     if let Some(root) = explicit {
         std::fs::create_dir_all(&root)
             .with_context(|| format!("creating {}", root.display()))?;
-        return Ok(root);
+        return Ok((root, None));
     }
-    let stem = source
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "root".to_string());
+    let stem = stem_of(source);
 
     let mut entropy = crate::spec::fresh_seed();
     for attempt in 0.. {
         entropy = crate::spec::mix64(entropy ^ attempt);
-        let candidate = base.join(format!("{stem}-{}", id_from(entropy)));
+        let id = id_from(entropy);
+        let candidate = base.join(format!("{stem}-{id}"));
         match std::fs::create_dir(&candidate) {
-            Ok(()) => return Ok(candidate),
+            Ok(()) => return Ok((candidate, Some(id))),
             // Taken — by another view, or by another magicfs a moment ago.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
@@ -220,6 +269,13 @@ pub fn allocate_root(source: &Path, base: &Path, explicit: Option<PathBuf>) -> R
         }
     }
     unreachable!()
+}
+
+fn stem_of(source: &Path) -> String {
+    source
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".to_string())
 }
 
 fn id_from(mut n: u64) -> String {
@@ -274,6 +330,7 @@ mod tests {
             source: source.to_path_buf(),
             spec: ViewSpec::default(),
             origin: None,
+            id: None,
         }
     }
 
@@ -316,7 +373,7 @@ mod tests {
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..50 {
-            let root = allocate_root(&source, &base, None).unwrap();
+            let root = allocate_root(&source, &base, None).unwrap().0;
             assert!(root.is_dir(), "the name must be claimed, not just chosen");
             assert!(seen.insert(root.clone()), "handed out {root:?} twice");
         }
@@ -328,7 +385,7 @@ mod tests {
         let base = td.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
 
-        let root = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap();
+        let root = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap().0;
         let name = root.file_name().unwrap().to_string_lossy().into_owned();
         let id = name.strip_prefix("photos-").expect("should read `photos-<id>`");
         assert_eq!(id.len(), ID_LEN, "got {name}");
@@ -339,13 +396,62 @@ mod tests {
     }
 
     #[test]
+    fn retitle_puts_the_ordering_in_the_name_and_keeps_the_id() {
+        let td = TempDir::new("view-retitle");
+        let base = td.path().join("base");
+        std::fs::create_dir_all(&base).unwrap();
+        let source = Path::new("/home/u/photos");
+        let (root, id) = allocate_root(source, &base, None).unwrap();
+        let id = id.unwrap();
+        let mut view = View { id: Some(id.clone()), ..view_at(&root, source) };
+
+        view.spec.sort = crate::spec::SortKey::Time;
+        view.retitle().unwrap();
+        assert_eq!(view.root, base.join(format!("photos-time-desc-{id}")));
+        assert!(view.root.is_dir() && !root.exists());
+
+        view.spec.reverse = true;
+        view.retitle().unwrap();
+        assert_eq!(view.root, base.join(format!("photos-time-asc-{id}")));
+
+        view.spec.sort = crate::spec::SortKey::Random;
+        view.retitle().unwrap();
+        assert_eq!(view.root, base.join(format!("photos-random-{id}")));
+    }
+
+    #[test]
+    fn retitle_draws_a_new_id_rather_than_take_a_name_in_use() {
+        let td = TempDir::new("view-retitle-clash");
+        let base = td.path().join("base");
+        std::fs::create_dir_all(base.join("photos-name-asc-abc")).unwrap();
+        std::fs::create_dir_all(base.join("photos-abc")).unwrap();
+        let source = Path::new("/home/u/photos");
+        let mut view = View { id: Some("abc".into()), ..view_at(&base.join("photos-abc"), source) };
+
+        view.retitle().unwrap();
+        let name = view.root.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("photos-name-asc-") && !name.ends_with("-abc"), "got {name}");
+        assert!(view.root.is_dir());
+    }
+
+    #[test]
+    fn retitle_leaves_a_directory_the_user_named_alone() {
+        let td = TempDir::new("view-retitle-out");
+        td.mkdir("mine");
+        let root = td.path().join("mine");
+        let mut view = view_at(&root, Path::new("/src"));
+        view.retitle().unwrap();
+        assert_eq!(view.root, root);
+    }
+
+    #[test]
     fn two_directories_with_the_same_name_get_separate_views() {
         let td = TempDir::new("view-alloc-clash");
         let base = td.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
 
-        let a = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap();
-        let b = allocate_root(Path::new("/mnt/backup/photos"), &base, None).unwrap();
+        let a = allocate_root(Path::new("/home/u/photos"), &base, None).unwrap().0;
+        let b = allocate_root(Path::new("/mnt/backup/photos"), &base, None).unwrap().0;
         assert_ne!(a, b);
     }
 
@@ -355,9 +461,9 @@ mod tests {
         let base = td.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
 
-        let live = allocate_root(Path::new("/src"), &base, None).unwrap();
+        let live = allocate_root(Path::new("/src"), &base, None).unwrap().0;
         view_at(&live, Path::new("/src")).save().unwrap();
-        let husk = allocate_root(Path::new("/src"), &base, None).unwrap();
+        let husk = allocate_root(Path::new("/src"), &base, None).unwrap().0;
 
         assert_eq!(stale_dirs(&base), vec![husk]);
     }

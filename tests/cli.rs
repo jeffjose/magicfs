@@ -215,13 +215,49 @@ fn output_capture_suppresses_the_subshell() {
 }
 
 #[test]
-fn a_reconfigured_view_stays_at_the_same_path() {
-    // The user cds in once; later commands must not move the directory out
-    // from under their shell.
+fn a_reconfigured_view_stays_put_when_the_shell_cannot_follow() {
+    // The user cds in once; with no wrapper to move their shell along, later
+    // commands must not rename the directory out from under it.
     let fx = chronological_fixture("stable-path");
     let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
     let (again, _, _) = fx.run(&["sort", "size"], Path::new(&view));
     assert_eq!(view, again);
+}
+
+fn dir_name(path: &str) -> String {
+    Path::new(path).file_name().unwrap().to_string_lossy().into_owned()
+}
+
+#[test]
+fn the_view_is_named_after_its_ordering() {
+    let fx = chronological_fixture("named-order");
+    let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
+    assert!(dir_name(&view).starts_with("photos-time-desc-"), "got {view}");
+
+    let (view, _, _) = fx.run(&["-s", "time", "-r"], &fx.source);
+    assert!(dir_name(&view).starts_with("photos-time-asc-"), "got {view}");
+
+    let (view, _, _) = fx.run(&["-s", "random"], &fx.source);
+    assert!(dir_name(&view).starts_with("photos-random-"), "got {view}");
+
+    let (view, _, _) = fx.run(&[], &fx.source);
+    assert!(dir_name(&view).starts_with("photos-name-asc-"), "got {view}");
+}
+
+#[test]
+fn re_sorting_with_the_wrapper_renames_the_view_and_takes_the_shell_along() {
+    let fx = chronological_fixture("rename-follow");
+    let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
+    let id = dir_name(&view).rsplit('-').next().unwrap().to_string();
+
+    let moved = cd_hint(&fx, &["sort", "size"], Path::new(&view), "resort")
+        .expect("the shell should be told where the view went");
+    assert_eq!(dir_name(&moved), format!("photos-size-desc-{id}"));
+    assert!(!Path::new(&view).exists(), "the old name should be gone");
+    assert_eq!(fx.glob(Path::new(&moved)).len(), 5);
+
+    // Nothing about the ordering changed: nowhere to go.
+    assert_eq!(cd_hint(&fx, &["filter", "png"], Path::new(&moved), "filter"), None);
 }
 
 #[test]

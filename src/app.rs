@@ -257,6 +257,7 @@ fn serve(
                 table.line(&invocation.with_files(files))
             }
         };
+        retitle(&mut view, pref, standing)?;
         links::apply(&view, &plan)?;
         view.save()?;
         if dry_run {
@@ -270,6 +271,7 @@ fn serve(
     {
         return manage(view, before, invocation, &plan, handling, standing, run);
     }
+    retitle(&mut view, pref, standing)?;
     links::apply(&view, &plan)?;
     view.save()?;
     eprintln!(
@@ -546,13 +548,13 @@ fn open_view(source: Option<PathBuf>, out: Option<PathBuf>) -> Result<View> {
 
     let base = view::base_dir();
     std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
-    let root = view::allocate_root(&source, &base, out)?;
+    let (root, id) = view::allocate_root(&source, &base, out)?;
 
     let spec = match View::load(&root) {
         Ok(existing) => existing.spec,
         Err(_) => ViewSpec { seed: fresh_seed(), ..Default::default() },
     };
-    Ok(View { root, source, spec, origin: None })
+    Ok(View { root, source, spec, origin: None, id })
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
@@ -569,6 +571,7 @@ fn apply_to_view(
     if plan.is_empty() && view.spec.unseen {
         return Err(nothing_new(&view, standing)?);
     }
+    retitle(&mut view, pref, standing)?;
     let stats = links::apply(&view, &plan)?;
     view.save()?;
 
@@ -586,6 +589,25 @@ fn apply_to_view(
     // leave the shell alone.
     print_path(&view.root, pref);
     Ok(view.root)
+}
+
+/// Put the ordering in the view's directory name — `photos-time-desc-4dk` —
+/// so a prompt or `magicfs list` says what you are looking at.
+///
+/// A view the shell is standing in is only renamed when the `shell-init`
+/// wrapper is there to move the shell along; otherwise its `$PWD` would name
+/// a directory that no longer exists, and a stale label is the lesser evil.
+fn retitle(view: &mut View, pref: CdPref, standing: Standing) -> Result<()> {
+    let follows = pref != CdPref::Never && std::env::var_os("MAGICFS_CD_FILE").is_some();
+    if standing == Standing::Inside && !follows {
+        return Ok(());
+    }
+    let before = view.root.clone();
+    view.retitle()?;
+    if standing == Standing::Inside && view.root != before {
+        emit_cd(&view.root)?;
+    }
+    Ok(())
 }
 
 /// Put the resulting path on stdout, where that is what it is for.

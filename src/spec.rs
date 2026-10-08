@@ -174,6 +174,15 @@ impl ViewSpec {
         self.sort.descends_by_default() != self.reverse
     }
 
+    /// The ordering as it appears in a view's directory name: `time-desc`,
+    /// `name-asc`, `random`.
+    pub fn label(&self) -> String {
+        match self.sort {
+            SortKey::Random => "random".to_string(),
+            k => format!("{}-{}", k.as_str(), if self.descending() { "desc" } else { "asc" }),
+        }
+    }
+
     /// A one-line human summary, e.g. `time desc, filter *.png, limit 20`.
     pub fn summary(&self) -> String {
         let mut parts = vec![match self.sort {
