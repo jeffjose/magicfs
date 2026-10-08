@@ -929,3 +929,79 @@ fn an_alias_only_the_shell_understands_is_run_by_it() {
     assert!(ok, "{err}");
     assert_eq!(out, "001-AAA.JPG 002-BBB.JPG");
 }
+
+/// Unmounts when the test ends, however it ends. Declared after the fixture so
+/// it goes first: the fixture deletes its directory, and the mount is in it.
+struct Unmount(PathBuf);
+
+impl Drop for Unmount {
+    fn drop(&mut self) {
+        let _ = Command::new("fusermount").arg("-uz").arg(&self.0).output();
+    }
+}
+
+/// A stand-in for `ssh` that serves this machine's own files — read-only, so
+/// nothing done to the mount can reach them — and runs `pwd` right here.
+/// `None` where there is nothing to mount with.
+fn fake_ssh(fx: &Fixture) -> Option<String> {
+    let on_path = |program: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| d.join(program).is_file()))
+    };
+    let server = ["/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/lib/ssh/sftp-server"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())?;
+    if !Path::new("/dev/fuse").exists() || !on_path("fusermount") {
+        return None;
+    }
+    if !on_path("sshfs") && !on_path("rclone") {
+        return None;
+    }
+    let script = fx.dir.join("ssh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncase \"$*\" in *sftp*) exec {server} -R ;; esac\nfor last; do :; done\nexec $last\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Some(script.to_string_lossy().into_owned())
+}
+
+#[test]
+fn a_remote_directory_is_mounted_viewed_and_let_go() {
+    let fx = chronological_fixture("remote");
+    let Some(ssh) = fake_ssh(&fx) else { return };
+    let _unmount = Unmount(fx.base.join("mnt/nas"));
+    let env = [("MAGICFS_ALIASES", "off"), ("MAGICFS_SSH", ssh.as_str())];
+
+    // `nas:photos` is relative to the remote home, which the stand-in reports
+    // as the directory it was run in.
+    let (view, err, ok) = fx.run_env(&["nas:photos", "-s", "time"], &fx.dir, &env);
+    if !ok && err.contains("cannot mount") {
+        // An rclone too old to be handed an ssh command, and no sshfs.
+        return;
+    }
+    assert!(ok, "{err}");
+    assert!(err.contains("nas:/"), "the source should read as the remote one: {err}");
+    assert_eq!(
+        fx.glob(Path::new(&view)),
+        vec!["001-aaa.jpg", "002-bbb.jpg", "003-ccc.jpg", "004-ddd.png", "005-eee.png"]
+    );
+
+    // A second view shares the mount, and a quoted glob is matched over there.
+    let (out, err, ok) =
+        fx.run_env(&["nas:photos", "-s", "time", "--dry-run", "mpv", "*.png"], &fx.dir, &env);
+    assert!(ok, "{err}");
+    assert_eq!(out, "mpv 001-ddd.png 002-eee.png");
+
+    let (out, _, _) = fx.run_env(&["list"], &fx.dir, &env);
+    assert!(out.contains("nas:/\t[mounted, 2 views]"), "{out}");
+
+    // Closing the last view of a host is what unmounts it.
+    let (_, err, ok) = fx.run_env(&["close", "--all"], &fx.dir, &env);
+    assert!(ok, "{err}");
+    assert!(err.contains("unmounted nas"), "{err}");
+    let (out, _, _) = fx.run_env(&["list"], &fx.dir, &env);
+    assert_eq!(out, "");
+}

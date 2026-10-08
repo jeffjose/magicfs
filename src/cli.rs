@@ -34,6 +34,13 @@ not the view's names, and anything that deletes asks first (-y skips it).
 A single quoted argument is handed to a shell inside the view instead:
 magicfs -s random 'mpv --loop *'.
 
+A directory on another machine is `host:path`, as scp spells it. It is
+mounted over ssh, and from there it is a directory like any other:
+
+  magicfs nas:videos              puts you in a view of it
+  magicfs -s random nas:videos mpv    shuffles it and plays it
+  magicfs close                   back where you were, and unmounted
+
 At a terminal, a command that lands somewhere moves you there — via the
 `shell-init` wrapper if you installed one, otherwise by starting a subshell
 you leave with `exit`. Redirected or in `$(...)`, it just prints the path.
@@ -204,10 +211,13 @@ pub fn split_argv<I: IntoIterator<Item = String>>(argv: I) -> (Vec<String>, Vec<
             return (out, Vec::new());
         }
         // A bare word with more of our options behind it can only be the
-        // source directory: `magicfs ~/photos -s time`. Anything else starts
+        // source directory: `magicfs ~/photos -s time`, or one on another
+        // machine, `magicfs nas:photos -s time`. Anything else starts
         // the trailing words, which we no longer look inside.
         let more_options = words.get(i + 1).is_some_and(|w| w.starts_with('-'));
-        if held.is_none() && more_options && std::path::Path::new(word).is_dir() {
+        let is_source = std::path::Path::new(word).is_dir()
+            || crate::remote::Remote::parse(word).is_some();
+        if held.is_none() && more_options && is_source {
             held = Some(word.to_string());
             i += 1;
             continue;
@@ -281,6 +291,14 @@ pub enum Command {
         /// Actually do it. Without this, `clean` only reports what it would remove.
         #[arg(long)]
         yes: bool,
+    },
+    /// Unmount remote hosts, closing the views of them. No host: all of them.
+    #[command(alias = "umount")]
+    Unmount {
+        hosts: Vec<String>,
+        /// Detach a mount even if a shell or a program is still inside it.
+        #[arg(long)]
+        force: bool,
     },
     /// Run a command with the ordered files as arguments, keeping their real names.
     Exec {
@@ -556,6 +574,13 @@ mod tests {
         let (cli, rest) = parse_from(&["magicfs", "/tmp", "-s", "random", "mpv", "*.mp4"]);
         assert_eq!(cli.spec.sort.as_deref(), Some("random"));
         assert_eq!(rest, words(&["/tmp", "mpv", "*.mp4"]));
+    }
+
+    #[test]
+    fn a_remote_source_can_come_before_our_options_too() {
+        let (cli, rest) = parse_from(&["magicfs", "nas:videos", "-s", "random", "mpv"]);
+        assert_eq!(cli.spec.sort.as_deref(), Some("random"));
+        assert_eq!(rest, words(&["nas:videos", "mpv"]));
     }
 
     #[test]

@@ -17,6 +17,11 @@ pub struct View {
     /// The real directory being presented.
     pub source: PathBuf,
     pub spec: ViewSpec,
+    /// Where the shell was when the view was opened, for a view of a remote
+    /// directory: closing it returns you there rather than into the mount,
+    /// which is what lets the mount go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<PathBuf>,
 }
 
 impl View {
@@ -235,6 +240,8 @@ pub fn stale_dirs(base: &Path) -> Vec<PathBuf> {
     };
     rd.flatten()
         .map(|d| d.path())
+        // The mounts are neither, and must never be mistaken for debris.
+        .filter(|p| !p.ends_with(crate::remote::MOUNTS))
         .filter(|p| p.is_dir() && !p.join(STATE_FILE).exists())
         .collect()
 }
@@ -266,6 +273,7 @@ mod tests {
             root: root.to_path_buf(),
             source: source.to_path_buf(),
             spec: ViewSpec::default(),
+            origin: None,
         }
     }
 

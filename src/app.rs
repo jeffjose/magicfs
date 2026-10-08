@@ -14,6 +14,7 @@ use crate::invoke::{self, Ask};
 use crate::links;
 use crate::naming::{Named, render};
 use crate::order::arrange;
+use crate::remote::{self, Remote};
 use crate::seen::{self, Seen};
 use crate::spec::{ViewSpec, fresh_seed};
 use crate::view::{self, View};
@@ -75,6 +76,7 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
         Some(Command::List) => list(),
         Some(Command::Close { all }) => close(all),
         Some(Command::Clean { yes }) => clean(yes),
+        Some(Command::Unmount { hosts, force }) => unmount(&hosts, force),
         Some(Command::Exec { spec, dry_run, command }) => exec(spec, dry_run, &command),
         Some(Command::Paths { spec, print0 }) => paths(spec, print0),
         Some(Command::Which { name }) => which(&name),
@@ -141,7 +143,7 @@ fn root(
         }
 
     let view = match (source, view::current()?) {
-        (Some(source), _) => open_view(Some(source), out)?,
+        (Some(source), _) => open_source(source, out)?,
         // `--new` from inside a view: another view of what *it* presents, not
         // of the view directory itself.
         (None, Some(current)) => sibling_of(&current)?,
@@ -272,7 +274,7 @@ fn serve(
     view.save()?;
     eprintln!(
         "{} → {} entries [{}]",
-        view.source.display(),
+        remote::shown(&view.source),
         plan.len(),
         view.spec.summary()
     );
@@ -348,6 +350,7 @@ fn manage(
 
     if run.dry_run {
         println!("{}", shown(&argv));
+        remote::release_idle(&view::list_views(), &[]);
         return Ok(());
     }
     if handling.destructive && !run.yes && !confirm(&argv[0], &view, plan)? {
@@ -364,6 +367,9 @@ fn manage(
         let refreshed = View { spec: before, ..view };
         let plan = build_plan(&refreshed.source, &refreshed.spec)?;
         links::apply(&refreshed, &plan)?;
+    } else {
+        // A host mounted for this one command has nothing left to do.
+        remote::release_idle(&view::list_views(), &[]);
     }
     use std::os::unix::process::ExitStatusExt;
     std::process::exit(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
@@ -383,7 +389,7 @@ fn confirm(program: &str, view: &View, plan: &[Named]) -> Result<bool> {
     }
     const SHOWN: usize = 10;
     let noun = if plan.len() == 1 { "file" } else { "files" };
-    eprintln!("{program} {} {noun} in {}:", plan.len(), view.source.display());
+    eprintln!("{program} {} {noun} in {}:", plan.len(), remote::shown(&view.source));
     for named in plan.iter().take(SHOWN) {
         eprintln!("  {}", named.entry.rel);
     }
@@ -427,10 +433,10 @@ fn not_a_file(word: &str, source: &Path, entries: &[Entry]) -> anyhow::Error {
     match invoke::suggest(word, entries) {
         Some(near) => anyhow::anyhow!(
             "`{word}` is not a file in {} — did you mean `{}`?",
-            source.display(),
+            remote::shown(source),
             near.name
         ),
-        None => anyhow::anyhow!("`{word}` is not a file in {}", source.display()),
+        None => anyhow::anyhow!("`{word}` is not a file in {}", remote::shown(source)),
     }
 }
 
@@ -494,7 +500,29 @@ fn shell_argv(line: &str) -> Vec<String> {
 fn sibling_of(view: &View) -> Result<View> {
     let mut fresh = open_view(Some(view.source.clone()), None)?;
     fresh.spec = view.spec.clone();
+    fresh.origin = view.origin.clone();
     Ok(fresh)
+}
+
+/// [`open_view`], for a source as it was typed: a directory here, or
+/// `host:path`, which is mounted first and is a directory here from then on.
+fn open_source(word: PathBuf, out: Option<PathBuf>) -> Result<View> {
+    let Some(remote) = word.to_str().and_then(Remote::parse) else {
+        return open_view(Some(word), out);
+    };
+    let mut view = open_view(Some(remote::open(&remote)?), out)?;
+    view.origin = std::env::current_dir().ok();
+    Ok(view)
+}
+
+/// Where closing a view should leave a shell that is standing in it: the
+/// directory it presents — or, for a remote one, wherever you opened it from,
+/// so that nothing is left holding the mount.
+fn way_back(view: &View) -> PathBuf {
+    match &view.origin {
+        Some(origin) if origin.is_dir() => origin.clone(),
+        _ => view.source.clone(),
+    }
 }
 
 /// Resolve a source directory to the view that presents it, creating the view
@@ -524,7 +552,7 @@ fn open_view(source: Option<PathBuf>, out: Option<PathBuf>) -> Result<View> {
         Ok(existing) => existing.spec,
         Err(_) => ViewSpec { seed: fresh_seed(), ..Default::default() },
     };
-    Ok(View { root, source, spec })
+    Ok(View { root, source, spec, origin: None })
 }
 
 /// Rebuild a view, persist it, and tell the user (and the shell) where it is.
@@ -546,7 +574,7 @@ fn apply_to_view(
 
     eprintln!(
         "{} → {} entries [{}]",
-        view.source.display(),
+        remote::shown(&view.source),
         stats.total(),
         view.spec.summary()
     );
@@ -721,7 +749,7 @@ fn views_to_close() -> Result<Vec<View>> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let mine: Vec<View> = view::list_views().into_iter().filter(|v| v.source == cwd).collect();
     if mine.is_empty() {
-        bail!("no magicfs view of {}", cwd.display());
+        bail!("no magicfs view of {}", remote::shown(&cwd));
     }
     Ok(mine)
 }
@@ -754,7 +782,7 @@ fn resolve_source(args: &SpecArgs) -> Result<(PathBuf, ViewSpec)> {
 fn report(view: &View) -> Result<PathBuf> {
     let plan = build_plan(&view.source, &view.spec)?;
     eprintln!("view    {}", view.root.display());
-    eprintln!("source  {}", view.source.display());
+    eprintln!("source  {}", remote::shown(&view.source));
     eprintln!("order   {}", view.spec.summary());
     eprintln!("entries {}", plan.len());
     if let Some(first) = plan.first() {
@@ -773,16 +801,26 @@ fn status() -> Result<()> {
 
 fn list() -> Result<()> {
     let views = view::list_views();
-    if views.is_empty() {
+    let mounts = remote::mounted();
+    if views.is_empty() && mounts.is_empty() {
         eprintln!("no views. create one with `magicfs <dir>`");
         return Ok(());
     }
-    for view in views {
+    for view in &views {
         println!(
             "{}\t{}\t[{}]",
             view.root.display(),
-            view.source.display(),
+            remote::shown(&view.source),
             view.spec.summary()
+        );
+    }
+    for mount in mounts {
+        let n = views.iter().filter(|v| v.source.starts_with(&mount.point)).count();
+        println!(
+            "{}\t{}:/\t[mounted, {n} {}]",
+            mount.point.display(),
+            mount.host,
+            if n == 1 { "view" } else { "views" }
         );
     }
     Ok(())
@@ -794,16 +832,26 @@ fn close(all: bool) -> Result<()> {
         eprintln!("no views to close");
         return Ok(());
     }
+    let landings = close_views(targets)?;
+    remote::release_idle(&view::list_views(), &landings);
+    Ok(())
+}
 
+/// Close these views, and return where any shell standing in one of them is
+/// being sent — which must still be there when it arrives.
+fn close_views(targets: Vec<View>) -> Result<Vec<PathBuf>> {
     let cwd = std::env::current_dir().ok();
+    let mut landings = Vec::new();
     for view in targets {
         // Closing the view you are standing in would strand the shell in a
         // deleted directory, so get it back to the real source first.
         let standing_in_it = cwd.as_deref().is_some_and(|c| c.starts_with(&view.root));
         let mut keep_dir = false;
         if standing_in_it {
-            emit_cd(&view.source)?;
-            let src = view.source.display();
+            let back = way_back(&view);
+            emit_cd(&back)?;
+            let src = back.display();
+            landings.push(back.clone());
             if std::env::var_os("MAGICFS_CD_FILE").is_some() {
                 // The wrapper cds the real shell the moment we exit.
                 eprintln!("returning to {src}");
@@ -822,6 +870,51 @@ fn close(all: bool) -> Result<()> {
         let _ = view::registry_remove(&view.root);
         eprintln!("closed {}", view.root.display());
     }
+    Ok(landings)
+}
+
+/// `magicfs unmount [HOST...]` — be done with a remote host: close the views
+/// of it and let the mount go.
+///
+/// `close` already does this when the last view of a host goes, so this is
+/// for the mount that outlived its views, or for "all of it, now".
+fn unmount(hosts: &[String], force: bool) -> Result<()> {
+    let mut mounts = remote::mounted();
+    if let Some(unknown) = hosts.iter().find(|h| !mounts.iter().any(|m| &m.host == *h)) {
+        bail!("{unknown} is not mounted — `magicfs list` shows what is");
+    }
+    if !hosts.is_empty() {
+        mounts.retain(|m| hosts.contains(&m.host));
+    }
+    if mounts.is_empty() {
+        eprintln!("nothing is mounted");
+        return Ok(());
+    }
+
+    let theirs: Vec<View> = view::list_views()
+        .into_iter()
+        .filter(|v| mounts.iter().any(|m| v.source.starts_with(&m.point)))
+        .collect();
+    let landings = close_views(theirs)?;
+
+    let mut busy = Vec::new();
+    for mount in mounts {
+        // A shell on its way into the mount isn't holding it open yet.
+        let awaited = landings.iter().any(|l| l.starts_with(&mount.point));
+        if (!awaited && remote::unmount(&mount.point, false))
+            || (force && remote::unmount(&mount.point, true))
+        {
+            eprintln!("unmounted {}", mount.host);
+        } else {
+            busy.push(mount.host);
+        }
+    }
+    if !busy.is_empty() {
+        bail!(
+            "{} still in use — a shell or a program is inside it (--force detaches it anyway)",
+            busy.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -834,33 +927,41 @@ fn close(all: bool) -> Result<()> {
 fn clean(yes: bool) -> Result<()> {
     let views = view::list_views();
     let stale = view::stale_dirs(&view::base_dir());
-    if views.is_empty() && stale.is_empty() {
+    let mounts = remote::mounted();
+    if views.is_empty() && stale.is_empty() && mounts.is_empty() {
         eprintln!("nothing to clean");
         return Ok(());
     }
 
     if !yes {
         for view in &views {
-            eprintln!("would close {}  ({})", view.root.display(), view.source.display());
+            eprintln!("would close {}  ({})", view.root.display(), remote::shown(&view.source));
         }
         for dir in &stale {
             eprintln!("would remove {}  (leftover)", dir.display());
         }
+        for mount in &mounts {
+            eprintln!("would unmount {}", mount.host);
+        }
         eprintln!(
-            "\n{} view(s), {} leftover(s) — links only, no real files. Re-run with --yes.",
+            "\n{} view(s), {} leftover(s), {} mount(s) — links only, no real files. Re-run with --yes.",
             views.len(),
-            stale.len()
+            stale.len(),
+            mounts.len()
         );
         return Ok(());
     }
 
     let cwd = std::env::current_dir().ok();
     let mut removed = 0usize;
+    let mut landings = Vec::new();
     for view in views {
         // Same rule as `close`: never delete the directory this shell is in.
         let standing_in_it = cwd.as_deref().is_some_and(|c| c.starts_with(&view.root));
         if standing_in_it {
-            emit_cd(&view.source)?;
+            let back = way_back(&view);
+            emit_cd(&back)?;
+            landings.push(back);
             eprintln!("you are in {} — cd out, or `exit`", view.root.display());
         }
         links::close(&view, standing_in_it)?;
@@ -873,6 +974,14 @@ fn clean(yes: bool) -> Result<()> {
         }
         if std::fs::remove_dir(&dir).is_ok() {
             removed += 1;
+        }
+    }
+    for mount in mounts {
+        // The one mount that has to stay: a shell is about to be sent into it.
+        if landings.iter().any(|l| l.starts_with(&mount.point)) {
+            eprintln!("left {} mounted — you are being returned into it", mount.host);
+        } else if remote::unmount(&mount.point, false) || remote::unmount(&mount.point, true) {
+            eprintln!("unmounted {}", mount.host);
         }
     }
     eprintln!("cleaned {removed} directories");
@@ -892,7 +1001,7 @@ fn exec(args: SpecArgs, dry_run: bool, command: &[String]) -> Result<()> {
         if spec.unseen {
             return Err(caught_up(&source, &spec)?);
         }
-        bail!("nothing matched [{}] in {}", spec.summary(), source.display());
+        bail!("nothing matched [{}] in {}", spec.summary(), remote::shown(&source));
     }
     if spec.unseen && !dry_run {
         mark(&source, plan.iter().map(|n| &n.entry))?;
@@ -996,7 +1105,7 @@ fn sessions(args: SpecArgs) -> Result<()> {
     let gap = crate::when::gap();
     let found = crate::when::sessions(&stamps, gap);
     if found.is_empty() {
-        bail!("no files in {} [{}]", source.display(), spec.summary());
+        bail!("no files in {} [{}]", remote::shown(&source), spec.summary());
     }
 
     let now = crate::when::now();
@@ -1064,13 +1173,13 @@ fn caught_up(source: &Path, spec: &ViewSpec) -> Result<anyhow::Error> {
         return Ok(anyhow::anyhow!(
             "nothing matched [{}] in {}",
             spec.summary(),
-            source.display()
+            remote::shown(source)
         ));
     }
     let when = seen.last_marked_ago().map(|s| format!(", last marked {}", seen::ago(s)));
     Ok(anyhow::anyhow!(
         "nothing new in {} ({hidden} seen{})",
-        source.display(),
+        remote::shown(source),
         when.unwrap_or_default()
     ))
 }
@@ -1114,7 +1223,7 @@ fn mark_seen(files: &[String]) -> Result<()> {
             .unwrap_or_default();
         eprintln!(
             "{}: {} of {} seen{when}",
-            source.display(),
+            remote::shown(&source),
             seen.count_in(&entries),
             entries.len()
         );
@@ -1122,7 +1231,7 @@ fn mark_seen(files: &[String]) -> Result<()> {
     }
     let added = seen.mark(named(files, &source, &entries)?);
     seen.save()?;
-    eprintln!("marked {added} seen in {}", source.display());
+    eprintln!("marked {added} seen in {}", remote::shown(&source));
     Ok(())
 }
 
@@ -1143,7 +1252,7 @@ fn unsee(last: bool, all: bool, files: &[String]) -> Result<()> {
         seen.unmark(named(files, &source, &entries)?)
     };
     seen.save()?;
-    eprintln!("{removed} unseen again in {}", source.display());
+    eprintln!("{removed} unseen again in {}", remote::shown(&source));
     Ok(())
 }
 

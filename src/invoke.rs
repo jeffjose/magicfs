@@ -38,12 +38,20 @@ pub enum Ask {
 ///   2. a word that names an executable is a command;
 ///   3. words that all name files are a glob expansion, so there is no command;
 ///   4. a directory in front of the rest is an explicit source.
+///
+/// `host:path` in front is a source too — see [`crate::remote`].
 pub fn interpret(rest: &[String]) -> (Option<PathBuf>, Ask) {
     if rest.is_empty() {
         return (None, Ask::View);
     }
     if rest.len() == 1 && is_dir(&rest[0]) {
         return (Some(PathBuf::from(&rest[0])), Ask::View);
+    }
+    // `nas:videos` names nothing here, so there is nothing to weigh it
+    // against — and the words after it can't be a glob's output, because the
+    // shell that expanded them has never seen that directory.
+    if !is_program(&rest[0]) && crate::remote::Remote::parse(&rest[0]).is_some() {
+        return (Some(PathBuf::from(&rest[0])), tail(&rest[1..]));
     }
     match tail(rest) {
         // Not a command and not a file list, but it does name a directory:
@@ -168,7 +176,7 @@ pub fn select_with(
             // Quoted, so the shell left it alone: expand it ourselves.
             let hits = matching(word, entries, opts.case_sensitive)?;
             if hits.is_empty() {
-                bail!("nothing in {} matches `{word}`", source.display());
+                bail!("nothing in {} matches `{word}`", crate::remote::shown(source));
             }
             hits
         } else if let Some(fix) = opts.correct.as_mut()
@@ -718,6 +726,22 @@ mod tests {
         assert_eq!(
             interpret(&words(&[&dir, "true", "--flag"])),
             (Some(PathBuf::from(&dir)), Ask::Run(words(&["true", "--flag"])))
+        );
+    }
+
+    #[test]
+    fn a_remote_directory_is_a_source_whatever_follows_it() {
+        let src = Some(PathBuf::from("nas:videos"));
+        assert_eq!(interpret(&words(&["nas:videos"])), (src.clone(), Ask::View));
+        assert_eq!(
+            interpret(&words(&["nas:videos", "true", "--flag"])),
+            (src.clone(), Ask::Run(words(&["true", "--flag"])))
+        );
+        // Words that look like files are files *there*: the host must not be
+        // read as one more of them.
+        assert_eq!(
+            interpret(&words(&["10.0.0.2:/srv", "*.mp4"])),
+            (Some(PathBuf::from("10.0.0.2:/srv")), Ask::Pick(words(&["*.mp4"])))
         );
     }
 

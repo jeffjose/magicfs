@@ -152,6 +152,7 @@ mod tests {
             root: root.to_path_buf(),
             source: source.to_path_buf(),
             spec: spec.clone(),
+            origin: None,
         };
         let entries = arrange(scan(source, spec)?, spec)?;
         let plan = render(entries, spec);

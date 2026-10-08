@@ -289,11 +289,70 @@ $ magicfs paths -0 -f images | xargs -0 my-tool
 Both preserve the real filenames and create nothing on disk. `exec` works
 whether or not you have a view open.
 
+## Over ssh
+
+A directory on another machine is `host:path`, the way scp spells it. magicfs
+mounts it and from there it is a directory like any other — the same views,
+orderings, windows and commands:
+
+```console
+$ magicfs nas:videos               # mounts nas, and puts you in a view of the directory
+$ magicfs -s random                # reshuffle, as ever
+$ smplayer *                       # plays over ssh, in that order
+$ cd 001-clips                     # a subdirectory: now you are in the mount itself
+$ mfr smplayer *                   # ...which is a plain directory, so this works too
+$ magicfs close                    # back where you started, and nas is unmounted
+```
+
+`host` is whatever `ssh host` accepts, so your `~/.ssh/config` aliases, keys
+and jump hosts all apply; `user@host:` overrides the login. `nas:videos` is
+relative to your home directory there, `nas:/srv/videos` is absolute, and
+`nas:` is the home directory itself.
+
+Running a command in one line works too, with one difference: **don't leave
+the `*` bare.** Your shell expands it against the directory you are standing
+in, which is not the one you mean. Name no files, or quote the pattern, and it
+is matched on the other side:
+
+```console
+$ mfr nas:videos smplayer              # the whole directory, shuffled
+$ mfr nas:videos smplayer '*.mp4'      # just the mp4s
+$ magicfs nas:renders --latest mpv     # the newest file there
+$ magicfs nas:renders -w lastweek rm '*'   # asks first, naming nas:/...
+```
+
+The files are the real ones — `rm` there deletes on the remote machine.
+
+**The mount.** Each host is mounted once, at its `/`, under
+`$XDG_RUNTIME_DIR/magicfs/mnt/HOST`, and every view of that host shares it.
+It goes away when the last view of the host is closed, provided nothing is
+still using it: a shell standing in it or a player with a file open keeps it,
+and the next `magicfs close` tries again. `magicfs list` shows what is
+mounted; `magicfs unmount [HOST]` closes a host's views and unmounts it
+(`--force` detaches it even while in use), and `magicfs clean --yes` takes the
+mounts along with everything else. ssh keepalives are on, so a connection that
+drops is noticed and re-made rather than left to hang.
+
+Closing a remote view returns you to the directory you opened it from, not to
+the source — that would be inside the mount, and would hold it open.
+
+It needs [`sshfs`](https://github.com/libfuse/sshfs) in your `PATH` (`apt
+install sshfs`); without it a recent `rclone` is used instead.
+`MAGICFS_SSH='ssh -p 2222'` changes the ssh command.
+
+What is different about a remote directory:
+
+- Listing and `-s time` cost one round trip, but `-R` walks the tree over the
+  network, and seeking in a video is as fast as the link.
+- sftp has no creation time, so `--created` is the write time.
+- `--unseen` works as it does locally, and the list survives a remount.
+
 ## How the view is built
 
 A view is a plain directory of symlinks under `$XDG_RUNTIME_DIR/magicfs/`, named
 after the source with a short random id — `photos-4dk`. No mount, no daemon, no
-root, nothing to leak — and because the kernel resolves a symlink once, reads
+root, nothing to leak (a [remote directory](#over-ssh) is the one exception:
+that is mounted) — and because the kernel resolves a symlink once, reads
 afterwards run at full native speed. Reconfiguring only touches the links that
 actually moved (20,000 files: ~70ms to build, ~150ms to reshuffle).
 
@@ -327,6 +386,7 @@ clean` remove links only.
 | --- | --- |
 | `magicfs [DIR] [OPTS]` | Open a view of `DIR` (default: the current directory), or reconfigure the one you're in |
 | `magicfs [OPTS] CMD...` | ...and run `CMD` in it — see [Running a command](#running-a-command) |
+| `magicfs HOST:PATH [OPTS] [CMD...]` | The same, for a directory on another machine — see [Over ssh](#over-ssh) |
 | `magicfs sort KEY` | `name`, `natural`, `time`, `created`, `ctime`, `atime`, `size`, `ext`, `random` |
 | `magicfs reverse` | Flip the current order |
 | `magicfs filter PAT...` | Restrict the view; no args clears |
@@ -337,6 +397,7 @@ clean` remove links only.
 | `magicfs status` / `list` | Inspect views |
 | `magicfs close [--all]` | Remove views (links only) |
 | `magicfs clean [--yes]` | Remove every view and leftover; without `--yes`, just report |
+| `magicfs unmount [HOST...] [--force]` | Close a remote host's views and unmount it; no host means all |
 | `magicfs exec CMD...` | Run CMD with the ordered files as arguments |
 | `magicfs paths [-0]` | Print the ordered real paths |
 | `magicfs which NAME` | Real path behind a view entry |
@@ -461,5 +522,5 @@ shell's cwd makes every later command fail on `getcwd`.
 
 ```sh
 cargo build --release      # target/release/magicfs
-cargo test                 # 175 tests
+cargo test                 # 183 tests
 ```
