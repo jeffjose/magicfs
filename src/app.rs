@@ -24,6 +24,10 @@ use crate::view::{self, View};
 pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
     let pref = cli.cd_pref();
     let new = cli.new;
+    // Before anything is scanned, whichever command this turns out to be.
+    if cli.update {
+        remote::forget_all();
+    }
     match cli.command {
         None => {
             let (source, ask) = invoke::interpret(rest);
@@ -31,6 +35,7 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
                 dry_run: cli.dry_run,
                 real: if cli.real { Some(true) } else if cli.links { Some(false) } else { None },
                 yes: cli.yes,
+                update: cli.update,
             };
             root(source, cli.spec, cli.out, pref, new, ask, run)
         }
@@ -112,6 +117,8 @@ pub fn build_plan(source: &Path, spec: &ViewSpec) -> Result<Vec<Named>> {
 /// How to run a trailing command, beyond which files it gets.
 #[derive(Clone, Copy, Debug, Default)]
 struct RunFlags {
+    /// `--update` on its own is a request to rebuild, not a question.
+    update: bool,
     dry_run: bool,
     /// `--real` / `--links`; `None` decides by what the program is.
     real: Option<bool>,
@@ -140,7 +147,7 @@ fn root(
             if ask != Ask::View {
                 return serve(view, args, ask, pref, Standing::Inside, run);
             }
-            let root = if args.is_empty() {
+            let root = if args.is_empty() && !run.update {
                 report(&view)?
             } else {
                 apply_to_view(view, args, pref, Standing::Inside)?

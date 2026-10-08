@@ -169,13 +169,23 @@ pub fn release_idle(views: &[View], keep: &[PathBuf]) {
 
 /// Make the mount under `source`, if there is one, forget the listings it
 /// has cached, so the next look at a directory asks the host.
-///
+pub fn forget(source: &Path) {
+    let under: Vec<Mount> =
+        mounted().into_iter().filter(|m| source.starts_with(&m.point)).collect();
+    flush(&under);
+}
+
+/// [`forget`], for every host that is mounted.
+pub fn forget_all() {
+    flush(&mounted());
+}
+
 /// rclone drops its directory cache on SIGHUP. sshfs has nothing of the kind,
 /// so there a listing can be up to its cache time (20s) behind.
-pub fn forget(source: &Path) {
-    let Some(mount) = mounted().into_iter().find(|m| source.starts_with(&m.point)) else {
+fn flush(mounts: &[Mount]) {
+    if mounts.is_empty() {
         return;
-    };
+    }
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return;
     };
@@ -184,7 +194,7 @@ pub fn forget(source: &Path) {
         let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             continue;
         };
-        if serves(&cmdline, &mount.point) {
+        if mounts.iter().any(|m| serves(&cmdline, &m.point)) {
             // SAFETY: a signal to a process of ours; nothing is shared.
             told |= unsafe { libc::kill(pid, libc::SIGHUP) } == 0;
         }

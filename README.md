@@ -345,7 +345,8 @@ What is different about a remote directory:
 - Listing and `-s time` cost one round trip, but `-R` walks the tree over the
   network, and seeking in a video is as fast as the link.
 - The mount remembers a directory listing for 20 seconds. `magicfs update`
-  makes rclone forget it first; sshfs cannot be told to, so there a file made
+  makes rclone forget it first, and so does `--update` on any command
+  (`magicfs -s time --update mpv`); sshfs cannot be told to, so there a file made
   on the host a moment ago can take that long to show up.
 - sftp has no creation time, so `--created` is the write time.
 - `--unseen` works as it does locally, and the list survives a remount.
@@ -431,7 +432,7 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 `-w/--when` `--created` `--latest` `--oldest`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
-`--links` `-y/--yes`
+`--links` `-y/--yes` `--update`
 
 Filter patterns accept a bare extension (`png`), a class (`images`, `raw`,
 `video`, `audio`, `docs`, `archives`), or a glob (`'IMG_*'`, `'2024/*'`).

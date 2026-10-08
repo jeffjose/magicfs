@@ -423,6 +423,24 @@ fn a_command_naming_no_files_still_receives_the_whole_view() {
 }
 
 #[test]
+fn update_hands_the_command_files_that_appeared_since() {
+    let fx = chronological_fixture("update-flag");
+    let (view, _, _) = fx.run(&["-s", "time"], &fx.source);
+    fx.photo("fff.png", "2024-06-01 00:00");
+
+    let (out, _, ok) =
+        fx.run(&["-s", "time", "--update", "--dry-run", "mpv"], Path::new(&view));
+    assert!(ok);
+    assert!(out.starts_with("mpv 001-fff.png "), "got: {out}");
+
+    // `--refresh` is the same flag, and on its own it rebuilds the view.
+    fx.photo("ggg.png", "2024-07-01 00:00");
+    let (_, _, ok) = fx.run(&["--refresh"], Path::new(&view));
+    assert!(ok);
+    assert_eq!(fx.glob(Path::new(&view))[0], "001-ggg.png");
+}
+
+#[test]
 fn a_command_actually_runs_inside_the_view() {
     let fx = chronological_fixture("run-real");
     let names = expanded(&fx);

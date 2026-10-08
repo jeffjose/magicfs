@@ -104,6 +104,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub new: bool,
 
+    /// Look at the source afresh first, so files that have appeared since are
+    /// in what the command gets: `magicfs -s time --update mpv`.
+    ///
+    /// A view is rebuilt from its source on every command anyway; what this
+    /// adds is making a remote mount forget the listings it has cached.
+    #[arg(long, visible_alias = "refresh", global = true)]
+    pub update: bool,
+
     /// Stay put: build the view, print its path, and don't move the shell.
     #[arg(long, global = true)]
     pub no_cd: bool,
