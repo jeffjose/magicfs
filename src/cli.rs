@@ -274,7 +274,8 @@ pub enum Command {
     Limit { n: String },
     /// Reset filters, limit and --unseen, keeping the ordering.
     Clear,
-    /// Rebuild the view from the source directory.
+    /// Rebuild the view from the source directory, picking up new files.
+    #[command(visible_alias = "update")]
     Refresh,
     /// Show the current view's configuration.
     Status,

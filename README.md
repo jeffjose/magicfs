@@ -344,6 +344,9 @@ What is different about a remote directory:
 
 - Listing and `-s time` cost one round trip, but `-R` walks the tree over the
   network, and seeking in a video is as fast as the link.
+- The mount remembers a directory listing for 20 seconds. `magicfs update`
+  makes rclone forget it first; sshfs cannot be told to, so there a file made
+  on the host a moment ago can take that long to show up.
 - sftp has no creation time, so `--created` is the write time.
 - `--unseen` works as it does locally, and the list survives a remount.
 
@@ -400,7 +403,7 @@ clean` remove links only.
 | `magicfs exclude PAT...` | Drop matching entries |
 | `magicfs limit N` | Keep the first N; `none` removes the limit |
 | `magicfs clear` | Drop filters, limit, `--when` and `--unseen`, keep the ordering |
-| `magicfs refresh` | Pick up changes in the source directory |
+| `magicfs refresh` (or `update`) | Pick up changes in the source directory |
 | `magicfs status` / `list` | Inspect views |
 | `magicfs close [--all]` | Remove views (links only) |
 | `magicfs clean [--yes]` | Remove every view and leftover; without `--yes`, just report |

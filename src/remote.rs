@@ -167,6 +167,49 @@ pub fn release_idle(views: &[View], keep: &[PathBuf]) {
     }
 }
 
+/// Make the mount under `source`, if there is one, forget the listings it
+/// has cached, so the next look at a directory asks the host.
+///
+/// rclone drops its directory cache on SIGHUP. sshfs has nothing of the kind,
+/// so there a listing can be up to its cache time (20s) behind.
+pub fn forget(source: &Path) {
+    let Some(mount) = mounted().into_iter().find(|m| source.starts_with(&m.point)) else {
+        return;
+    };
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    let mut told = false;
+    for pid in procs.flatten().filter_map(|d| d.file_name().to_str()?.parse::<i32>().ok()) {
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        if serves(&cmdline, &mount.point) {
+            // SAFETY: a signal to a process of ours; nothing is shared.
+            told |= unsafe { libc::kill(pid, libc::SIGHUP) } == 0;
+        }
+    }
+    if told {
+        // The flush happens when rclone gets round to the signal, and there
+        // is no reply to wait for.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
+/// Whether a `/proc/PID/cmdline` is the rclone serving `point`.
+fn serves(cmdline: &[u8], point: &Path) -> bool {
+    let mut args = cmdline.split(|b| *b == 0);
+    let rclone = args.next().is_some_and(|a| {
+        Path::new(&*String::from_utf8_lossy(a)).file_name().is_some_and(|n| {
+            n.to_string_lossy().starts_with("rclone")
+        })
+    });
+    let args: Vec<&[u8]> = args.collect();
+    rclone
+        && args.first() == Some(&b"mount".as_slice())
+        && args.contains(&point.as_os_str().as_encoded_bytes())
+}
+
 /// Unmount, and say whether it went. `force` detaches a mount that is still in
 /// use; without it a busy mount is left exactly as it was.
 pub fn unmount(point: &Path, force: bool) -> bool {
@@ -325,6 +368,21 @@ mod tests {
 
     fn remote(host: &str, path: &str) -> Option<Remote> {
         Some(Remote { host: host.to_string(), path: path.to_string() })
+    }
+
+    #[test]
+    fn only_the_rclone_serving_a_mount_is_told_to_forget() {
+        let point = Path::new("/run/user/1000/magicfs/mnt/nas");
+        let line = |words: &[&str]| words.join("\0").into_bytes();
+        let ours = ["/opt/rclone-v1.75/rclone", "mount", "magicfs:/", "/run/user/1000/magicfs/mnt/nas", "--daemon"];
+        assert!(serves(&line(&ours), point));
+
+        let other_mount = ["rclone", "mount", "magicfs:/", "/run/user/1000/magicfs/mnt/other"];
+        assert!(!serves(&line(&other_mount), point));
+        let not_a_mount = ["rclone", "ls", "/run/user/1000/magicfs/mnt/nas"];
+        assert!(!serves(&line(&not_a_mount), point));
+        let not_rclone = ["vim", "mount", "/run/user/1000/magicfs/mnt/nas"];
+        assert!(!serves(&line(&not_rclone), point));
     }
 
     #[test]

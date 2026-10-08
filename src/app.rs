@@ -71,7 +71,14 @@ pub fn run(cli: Cli, rest: &[String]) -> Result<()> {
             spec.limit = None;
             Ok(())
         }),
-        Some(Command::Refresh) => mutate(pref, new, |_| Ok(())),
+        Some(Command::Refresh) => {
+            // Asking for what is there now means now, not as of the mount's
+            // last look.
+            if let Some(view) = view::current()? {
+                remote::forget(&view.source);
+            }
+            mutate(pref, new, |_| Ok(()))
+        }
         Some(Command::Status) => status(),
         Some(Command::List) => list(),
         Some(Command::Close { all }) => close(all),
