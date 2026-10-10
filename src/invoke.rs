@@ -174,7 +174,11 @@ pub fn select_with(
             vec![rel]
         } else if is_pattern(word) {
             // Quoted, so the shell left it alone: expand it ourselves.
-            let hits = matching(word, entries, opts.case_sensitive)?;
+            let mut hits = matching(word, entries, opts.case_sensitive)?;
+            if hits.is_empty() {
+                // `'001*'`, typed in a view: it is the links' names that match.
+                hits = matching_here(word, entries, &mut canon, opts.case_sensitive)?;
+            }
             if hits.is_empty() {
                 bail!("nothing in {} matches `{word}`", crate::remote::shown(source));
             }
@@ -251,6 +255,59 @@ fn matching(pattern: &str, entries: &[Entry], case_sensitive: bool) -> Result<Ve
         .filter(|e| glob.is_match(e.name.as_str()) || (scoped && glob.is_match(e.rel.as_str())))
         .map(|e| e.rel.clone())
         .collect())
+}
+
+/// Entries the pattern reaches by way of the current directory — the view's
+/// own names, when that is where we are standing. A view name is the entry's
+/// name with a prefix, so `'001*'` and `'0[0-4]*'` match nothing in the source
+/// and are exactly what you would type looking at the listing.
+fn matching_here(
+    pattern: &str,
+    entries: &[Entry],
+    canon: &mut Option<HashMap<PathBuf, String>>,
+    case_sensitive: bool,
+) -> Result<Vec<String>> {
+    if pattern.contains('/') {
+        return Ok(Vec::new());
+    }
+    let glob = globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .with_context(|| format!("`{pattern}` is not a valid pattern"))?
+        .compile_matcher();
+    let Ok(dir) = std::fs::read_dir(".") else { return Ok(Vec::new()) };
+    let mut names: Vec<String> = dir
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && glob.is_match(n.as_str()))
+        .collect();
+    names.sort();
+    Ok(names.iter().filter_map(|n| resolve(n, entries, canon)).collect())
+}
+
+/// Have `cp` keep each file's times and mode, unless the command line already
+/// says what to preserve.
+///
+/// A copy made through magicfs was usually picked *by* time — `--latest`,
+/// `-w today`, a view sorted newest-first — and a copy stamped "now" loses the
+/// one thing that order was made of.
+pub fn keep_times(argv: &mut Vec<String>) {
+    let Some(program) = argv.first() else { return };
+    if Path::new(program).file_name().and_then(|n| n.to_str()) != Some("cp") {
+        return;
+    }
+    let decided = argv[1..].iter().take_while(|w| *w != "--").any(|w| {
+        match w.strip_prefix("--") {
+            Some(long) => {
+                long == "archive" || long.starts_with("preserve") || long.starts_with("no-preserve")
+            }
+            None => is_flag(w) && w.contains(['p', 'a']),
+        }
+    });
+    if !decided {
+        argv.insert(1, "-p".to_string());
+    }
 }
 
 /// What a program does with the files it is handed.

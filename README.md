@@ -154,6 +154,18 @@ question, `--dry-run` prints the command instead, and away from a terminal
 nothing is asked. Run from inside a view, the view is tidied afterwards so a
 deleted file doesn't linger as a broken link.
 
+That makes `magicfs cp` the way to copy out of a view you are standing in.
+Plain `cp 001-cat.png ~/keep` gives you a file called `001-cat.png`, dated now;
+through magicfs the copy is `cat.png`, with the original's times and mode
+(`cp` is given `-p` unless you already passed `-p`, `-a` or `--preserve`):
+
+```console
+$ magicfs nas:photos -s time     # in the view: 001-IMG_2934.jpg 002-...
+$ magicfs cp 00* ~/keep          # the first nine, as IMG_2934.jpg ...
+$ magicfs cp '*beach*' ~/keep    # quoted: matched against the real names,
+$ magicfs cp '00[1-3]*' ~/keep   # and failing that, the view's
+```
+
 For a destination that is itself in the directory (`cp * sub/`), the last word
 stays the destination. `--real` hands any other command real paths, and
 `--links` hands even `cp` the view's names.

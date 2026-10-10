@@ -362,7 +362,8 @@ fn manage(
         let _ = std::fs::remove_dir(&view.root);
     }
     let files = plan.iter().map(|n| n.entry.path.to_string_lossy().into_owned());
-    let argv = invocation.with_files(files);
+    let mut argv = invocation.with_files(files);
+    invoke::keep_times(&mut argv);
 
     if run.dry_run {
         println!("{}", shown(&argv));

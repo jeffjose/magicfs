@@ -408,7 +408,40 @@ fn a_destination_that_is_in_the_directory_stays_the_destination() {
     let (out, _, ok) =
         fx.run(&["--dry-run", "--dirs", "exclude", "cp", "aaa.jpg", "sub/"], &fx.source);
     assert!(ok);
-    assert_eq!(out, format!("cp {}/aaa.jpg sub/", fx.source.display()));
+    assert_eq!(out, format!("cp -p {}/aaa.jpg sub/", fx.source.display()));
+}
+
+#[test]
+fn cp_from_inside_a_view_copies_under_the_real_names_and_keeps_the_times() {
+    let fx = chronological_fixture("real-cp-inside");
+    let (view, _, ok) = fx.run(&["--no-cd", "-s", "time"], &fx.source);
+    assert!(ok);
+    let view = PathBuf::from(view);
+    let dest = fx.dir.join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    // Quoted, so it arrives as typed: a pattern on the view's names.
+    let (_, err, ok) = fx.run(&["cp", "00[12]*", dest.to_str().unwrap()], &view);
+    assert!(ok, "{err}");
+    let mut names: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["aaa.jpg", "bbb.jpg"], "no 001- prefix on the copies");
+    let mtime = |p: PathBuf| std::fs::metadata(p).unwrap().modified().unwrap();
+    assert_eq!(mtime(dest.join("aaa.jpg")), mtime(fx.source.join("aaa.jpg")));
+}
+
+#[test]
+fn cp_is_left_alone_when_it_already_says_what_to_preserve() {
+    let fx = chronological_fixture("real-cp-flags");
+    let src = fx.source.display();
+    for flag in ["-a", "-vp", "--no-preserve=timestamps"] {
+        let (out, _, ok) = fx.run(&["--dry-run", "cp", flag, "aaa.jpg", "/backup"], &fx.source);
+        assert!(ok);
+        assert_eq!(out, format!("cp {flag} {src}/aaa.jpg /backup"));
+    }
 }
 
 #[test]
