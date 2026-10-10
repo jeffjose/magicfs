@@ -434,6 +434,38 @@ fn cp_from_inside_a_view_copies_under_the_real_names_and_keeps_the_times() {
 }
 
 #[test]
+fn cp_takes_the_directories_a_glob_swept_up() {
+    let fx = chronological_fixture("real-cp-dirs");
+    let album = fx.source.join("album");
+    std::fs::create_dir_all(album.join("deep")).unwrap();
+    std::fs::write(album.join("deep/one.txt"), "one").unwrap();
+    Command::new("touch").args(["-d", "2019-05-05"]).arg(&album).status().unwrap();
+    let dest = fx.dir.join("dest");
+    std::fs::create_dir(&dest).unwrap();
+
+    let (out, _, ok) = fx.run(&["--dry-run", "cp", "album", "/backup"], &fx.source);
+    assert!(ok);
+    assert_eq!(out, format!("cp -p -r {}/album /backup", fx.source.display()));
+
+    let (_, err, ok) = fx.run(&["cp", "*", dest.to_str().unwrap()], &fx.source);
+    assert!(ok, "{err}");
+    assert!(err.contains("Copied 6 files"), "{err}");
+    assert_eq!(std::fs::read_to_string(dest.join("album/deep/one.txt")).unwrap(), "one");
+    assert!(dest.join("eee.png").exists());
+    let mtime = |p: PathBuf| std::fs::metadata(p).unwrap().modified().unwrap();
+    assert_eq!(mtime(dest.join("album")), mtime(album), "a directory keeps its time too");
+}
+
+#[test]
+fn cp_onto_the_source_itself_harms_nothing() {
+    let fx = chronological_fixture("real-cp-same");
+    let (_, err, ok) = fx.run(&["cp", "aaa.jpg", fx.source.to_str().unwrap()], &fx.source);
+    assert!(!ok);
+    assert!(err.contains("same file"), "{err}");
+    assert_eq!(std::fs::read_to_string(fx.source.join("aaa.jpg")).unwrap(), "aaa.jpg");
+}
+
+#[test]
 fn cp_is_left_alone_when_it_already_says_what_to_preserve() {
     let fx = chronological_fixture("real-cp-flags");
     let src = fx.source.display();

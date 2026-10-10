@@ -15,6 +15,7 @@
 pub mod aliases;
 pub mod app;
 pub mod cli;
+pub mod copy;
 pub mod demo;
 pub mod entry;
 pub mod invoke;

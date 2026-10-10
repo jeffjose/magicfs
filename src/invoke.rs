@@ -287,25 +287,31 @@ fn matching_here(
 }
 
 /// Have `cp` keep each file's times and mode, unless the command line already
-/// says what to preserve.
+/// says what to preserve — and descend into directories when `dirs` says some
+/// of what it is being handed are directories.
 ///
 /// A copy made through magicfs was usually picked *by* time — `--latest`,
 /// `-w today`, a view sorted newest-first — and a copy stamped "now" loses the
-/// one thing that order was made of.
-pub fn keep_times(argv: &mut Vec<String>) {
+/// one thing that order was made of. And the directories are there because
+/// `*` in a view matches them: nobody typed their names, so "-r not
+/// specified" is an answer to a question nobody asked.
+pub fn cp_defaults(argv: &mut Vec<String>, dirs: bool) {
     let Some(program) = argv.first() else { return };
     if Path::new(program).file_name().and_then(|n| n.to_str()) != Some("cp") {
         return;
     }
-    let decided = argv[1..].iter().take_while(|w| *w != "--").any(|w| {
-        match w.strip_prefix("--") {
-            Some(long) => {
-                long == "archive" || long.starts_with("preserve") || long.starts_with("no-preserve")
-            }
-            None => is_flag(w) && w.contains(['p', 'a']),
-        }
-    });
-    if !decided {
+    let has = |short: &[char], long: &[&str]| {
+        argv[1..].iter().take_while(|w| *w != "--").any(|w| match w.strip_prefix("--") {
+            Some(word) => long.iter().any(|l| word.starts_with(l)),
+            None => is_flag(w) && w.contains(short),
+        })
+    };
+    let preserving = has(&['p', 'a'], &["archive", "preserve", "no-preserve"]);
+    let recursing = has(&['r', 'R', 'a'], &["archive", "recursive"]);
+    if dirs && !recursing {
+        argv.insert(1, "-r".to_string());
+    }
+    if !preserving {
         argv.insert(1, "-p".to_string());
     }
 }

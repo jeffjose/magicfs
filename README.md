@@ -156,15 +156,22 @@ deleted file doesn't linger as a broken link.
 
 That makes `magicfs cp` the way to copy out of a view you are standing in.
 Plain `cp 001-cat.png ~/keep` gives you a file called `001-cat.png`, dated now;
-through magicfs the copy is `cat.png`, with the original's times and mode
-(`cp` is given `-p` unless you already passed `-p`, `-a` or `--preserve`):
+through magicfs the copy is `cat.png`, with the original's times and mode:
 
 ```console
 $ magicfs nas:photos -s time     # in the view: 001-IMG_2934.jpg 002-...
 $ magicfs cp 00* ~/keep          # the first nine, as IMG_2934.jpg ...
+     Copying [=========>               ] 3/9 files, 1.2/3.4 GiB, 11 MiB/s: IMG_0011.jpg
+      Copied 9 files (3.4 GiB) to /home/you/keep in 5m 12s
 $ magicfs cp '*beach*' ~/keep    # quoted: matched against the real names,
 $ magicfs cp '00[1-3]*' ~/keep   # and failing that, the view's
 ```
+
+magicfs does this copy itself, which is where the progress line comes from.
+Directories are copied whole — `*` in a view matches them, so there is no
+"-r not specified" — and `-n`, `-i` and `-v` mean what they mean to `cp`. Any
+other flag (`-u`, `--reflink`, ...) hands the job to the real `cp`, with `-p`
+and `-r` added unless you said otherwise, and no progress line.
 
 For a destination that is itself in the directory (`cp * sub/`), the last word
 stays the destination. `--real` hands any other command real paths, and

@@ -362,8 +362,11 @@ fn manage(
         let _ = std::fs::remove_dir(&view.root);
     }
     let files = plan.iter().map(|n| n.entry.path.to_string_lossy().into_owned());
+    // A plain `cp` is copied here, where there is a list to show progress
+    // through; anything fancier is `cp`'s to do.
+    let copy = crate::copy::job(&invocation.argv);
     let mut argv = invocation.with_files(files);
-    invoke::keep_times(&mut argv);
+    invoke::cp_defaults(&mut argv, plan.iter().any(|n| n.entry.is_dir));
 
     if run.dry_run {
         println!("{}", shown(&argv));
@@ -374,11 +377,21 @@ fn manage(
         bail!("nothing done");
     }
 
-    let (program, rest) = argv.split_first().expect("a command has a program");
-    let status = std::process::Command::new(program)
-        .args(rest)
-        .status()
-        .with_context(|| format!("cannot run `{program}`"))?;
+    let code = match copy {
+        Some(job) => {
+            let sources: Vec<PathBuf> = plan.iter().map(|n| n.entry.path.clone()).collect();
+            job.run(&sources)?
+        }
+        None => {
+            let (program, rest) = argv.split_first().expect("a command has a program");
+            let status = std::process::Command::new(program)
+                .args(rest)
+                .status()
+                .with_context(|| format!("cannot run `{program}`"))?;
+            use std::os::unix::process::ExitStatusExt;
+            status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+        }
+    };
 
     if standing == Standing::Inside {
         let refreshed = View { spec: before, ..view };
@@ -388,8 +401,7 @@ fn manage(
         // A host mounted for this one command has nothing left to do.
         remote::release_idle(&view::list_views(), &[]);
     }
-    use std::os::unix::process::ExitStatusExt;
-    std::process::exit(status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
+    std::process::exit(code);
 }
 
 /// "rm 31 files from ~/renders?" — the list is computed (a time window, a
