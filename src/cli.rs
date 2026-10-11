@@ -34,11 +34,13 @@ not the view's names, and anything that deletes asks first (-y skips it).
 A single quoted argument is handed to a shell inside the view instead:
 magicfs -s random 'mpv --loop *'.
 
-A directory on another machine is `host:path`, as scp spells it. It is
-mounted over ssh, and from there it is a directory like any other:
+A directory on another machine is `host:path`, the path read as it would be
+here: `nas:.` is this directory over there, `nas:videos` the videos in it,
+`nas:~/videos` the ones in your home there. It is mounted over ssh, and from
+there it is a directory like any other:
 
-  magicfs nas:videos              puts you in a view of it
-  magicfs -s random nas:videos mpv    shuffles it and plays it
+  magicfs nas:~/videos            puts you in a view of it
+  magicfs -s random nas:~/videos mpv  shuffles it and plays it
   magicfs close                   back where you were, and unmounted
 
 At a terminal, a command that lands somewhere moves you there — via the

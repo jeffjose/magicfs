@@ -159,7 +159,7 @@ Plain `cp 001-cat.png ~/keep` gives you a file called `001-cat.png`, dated now;
 through magicfs the copy is `cat.png`, with the original's times and mode:
 
 ```console
-$ magicfs nas:photos -s time     # in the view: 001-IMG_2934.jpg 002-...
+$ magicfs nas:~/photos -s time   # in the view: 001-IMG_2934.jpg 002-...
 $ magicfs cp 00* ~/keep          # the first nine, as IMG_2934.jpg ...
      Copying [=========>               ] 3/9 files, 1.2/3.4 GiB, 11 MiB/s: IMG_0011.jpg
       Copied 9 files (3.4 GiB) to /home/you/keep in 5m 12s
@@ -310,12 +310,12 @@ whether or not you have a view open.
 
 ## Over ssh
 
-A directory on another machine is `host:path`, the way scp spells it. magicfs
-mounts it and from there it is a directory like any other — the same views,
-orderings, windows and commands:
+A directory on another machine is `host:path`. magicfs mounts it and from
+there it is a directory like any other — the same views, orderings, windows
+and commands:
 
 ```console
-$ magicfs nas:videos               # mounts nas, and puts you in a view of the directory
+$ magicfs nas:~/videos             # mounts nas, and puts you in a view of the directory
 $ magicfs -s random                # reshuffle, as ever
 $ smplayer *                       # plays over ssh, in that order
 $ cd 001-clips                     # a subdirectory: now you are in the mount itself
@@ -324,9 +324,23 @@ $ magicfs close                    # back where you started, and nas is unmounte
 ```
 
 `host` is whatever `ssh host` accepts, so your `~/.ssh/config` aliases, keys
-and jump hosts all apply; `user@host:` overrides the login. `nas:videos` is
-relative to your home directory there, `nas:/srv/videos` is absolute, and
-`nas:` is the home directory itself.
+and jump hosts all apply; `user@host:` overrides the login.
+
+The path is read as it would be without the host in front of it, and then
+looked up on the other machine — so, standing in `/home/you/scripts`:
+
+| You type | The directory on nas |
+| --- | --- |
+| `nas:.` or `nas:` | `/home/you/scripts` — where you are, over there |
+| `nas:videos`, `nas:./videos` | `/home/you/scripts/videos` |
+| `nas:../photos` | `/home/you/photos` |
+| `nas:/srv/videos` | `/srv/videos` |
+| `nas:~`, `nas:~/videos` | your home directory *there*, and `videos` in it |
+
+This is not scp's reading, where `nas:videos` starts at the remote home: here
+that is `nas:~/videos`. Your shell leaves a `~` after the colon alone, so it
+is the home on nas even when it is somewhere else than yours; `nas:$HOME/x` is
+expanded before magicfs sees it, and is this machine's home path.
 
 Running a command in one line works too, with one difference: **don't leave
 the `*` bare.** Your shell expands it against the directory you are standing
@@ -334,10 +348,10 @@ in, which is not the one you mean. Name no files, or quote the pattern, and it
 is matched on the other side:
 
 ```console
-$ mfr nas:videos smplayer              # the whole directory, shuffled
-$ mfr nas:videos smplayer '*.mp4'      # just the mp4s
-$ magicfs nas:renders --latest mpv     # the newest file there
-$ magicfs nas:renders -w lastweek rm '*'   # asks first, naming nas:/...
+$ mfr nas:~/videos smplayer            # the whole directory, shuffled
+$ mfr nas:~/videos smplayer '*.mp4'    # just the mp4s
+$ magicfs nas:. --latest mpv           # the newest file in this directory, over there
+$ magicfs nas:/srv/renders -w lastweek rm '*'   # asks first, naming nas:/...
 ```
 
 The files are the real ones — `rm` there deletes on the remote machine.

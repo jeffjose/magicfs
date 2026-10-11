@@ -37,12 +37,17 @@ const SCHEMES: &[&str] = &[
 const KEEPALIVE: [&str; 3] =
     ["ServerAliveInterval=15", "ServerAliveCountMax=3", "ConnectTimeout=10"];
 
-/// A directory on another machine, as scp spells it: `[user@]host:path`.
+/// A directory on another machine: `[user@]host:path`.
+///
+/// The path is read as it would be without the host in front — `nas:videos`
+/// is the `videos` of the directory you are standing in, on nas — which is
+/// where this parts with scp, whose relative paths start at the remote home.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
     /// Whatever `ssh` would be given, so `~/.ssh/config` aliases work.
     pub host: String,
-    /// Absolute, or relative to the remote home. Empty is the home itself.
+    /// Absolute, under `~` (the remote home), or relative to the directory
+    /// this was typed in. Empty is that directory itself.
     pub path: String,
 }
 
@@ -71,18 +76,58 @@ impl Remote {
     }
 
     /// The path from the remote `/`, asking the host for its home directory
-    /// when the path is relative to it.
+    /// when the path starts at `~`. The shell leaves a `~` in the middle of a
+    /// word alone, so it gets here to be the home over there, not this one.
     fn absolute(&self) -> Result<String> {
         if self.path.starts_with('/') {
             return Ok(self.path.clone());
         }
-        let rest = match self.path.as_str() {
-            "~" => "",
-            path => path.strip_prefix("~/").unwrap_or(path),
+        let under_home = match self.path.as_str() {
+            "~" => Some(""),
+            path => path.strip_prefix("~/"),
         };
-        let home = home(&self.host)?;
-        Ok(format!("{}/{rest}", home.trim_end_matches('/')))
+        if let Some(rest) = under_home {
+            let home = home(&self.host)?;
+            return Ok(format!("{}/{rest}", home.trim_end_matches('/')));
+        }
+        Ok(mirrored(&here()?, &self.path))
     }
+}
+
+/// The directory a relative remote path starts from: this one, by the name
+/// the shell knows it by, so a symlinked checkout keeps its name on the other
+/// side. Inside a mount, it is the remote directory that is.
+fn here() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("cannot determine current directory")?;
+    if let Ok(rest) = cwd.strip_prefix(root()) {
+        let mut parts = rest.components();
+        if parts.next().is_some() {
+            return Ok(Path::new("/").join(parts.as_path()));
+        }
+    }
+    // `$PWD` is only believed when it is this directory.
+    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
+        pwd.is_absolute() && pwd.canonicalize().ok() == cwd.canonicalize().ok()
+    });
+    Ok(logical.unwrap_or(cwd))
+}
+
+/// `path` as seen from `cwd`, with `.` and `..` worked out by name alone —
+/// what they point at here says nothing about the other machine.
+fn mirrored(cwd: &Path, path: &str) -> String {
+    use std::path::Component;
+
+    let mut names: Vec<String> = Vec::new();
+    for part in cwd.join(path).components() {
+        match part {
+            Component::Normal(name) => names.push(name.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                names.pop();
+            }
+            _ => {}
+        }
+    }
+    format!("/{}", names.join("/"))
 }
 
 /// A mounted host.
@@ -293,7 +338,7 @@ fn mount(host: &str, point: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The remote home directory, which `host:videos` is relative to.
+/// The remote home directory, which `host:~/videos` is relative to.
 ///
 /// Asked for once per session and kept next to the mounts, since finding out
 /// costs a whole ssh connection.
@@ -420,6 +465,18 @@ mod tests {
     fn an_absolute_path_needs_no_trip_to_the_host() {
         let r = Remote { host: "nowhere.invalid".into(), path: "/srv/x".into() };
         assert_eq!(r.absolute().unwrap(), "/srv/x");
+    }
+
+    #[test]
+    fn a_relative_path_starts_where_you_are_standing() {
+        let cwd = Path::new("/home/u/scripts/magicfs");
+        assert_eq!(mirrored(cwd, ""), "/home/u/scripts/magicfs");
+        assert_eq!(mirrored(cwd, "."), "/home/u/scripts/magicfs");
+        assert_eq!(mirrored(cwd, "videos"), "/home/u/scripts/magicfs/videos");
+        assert_eq!(mirrored(cwd, "./videos/"), "/home/u/scripts/magicfs/videos");
+        assert_eq!(mirrored(cwd, "../"), "/home/u/scripts");
+        assert_eq!(mirrored(cwd, "../../videos"), "/home/u/videos");
+        assert_eq!(mirrored(cwd, "../../../../.."), "/");
     }
 
     #[test]

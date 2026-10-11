@@ -1094,8 +1094,8 @@ fn a_remote_directory_is_mounted_viewed_and_let_go() {
     let _unmount = Unmount(fx.base.join("mnt/nas"));
     let env = [("MAGICFS_ALIASES", "off"), ("MAGICFS_SSH", ssh.as_str())];
 
-    // `nas:photos` is relative to the remote home, which the stand-in reports
-    // as the directory it was run in.
+    // `nas:photos` is the `photos` of the directory this is run in, over there
+    // — and the stand-in's "there" is this machine.
     let (view, err, ok) = fx.run_env(&["nas:photos", "-s", "time"], &fx.dir, &env);
     if !ok && err.contains("cannot mount") {
         // An rclone too old to be handed an ssh command, and no sshfs.
@@ -1109,13 +1109,20 @@ fn a_remote_directory_is_mounted_viewed_and_let_go() {
     );
 
     // A second view shares the mount, and a quoted glob is matched over there.
+    // `~` is the remote home, which the stand-in reports as the directory it
+    // was run in — so standing in `photos`, `..` and `~` are the same place.
+    let photos = fx.dir.join("photos");
     let (out, err, ok) =
-        fx.run_env(&["nas:photos", "-s", "time", "--dry-run", "mpv", "*.png"], &fx.dir, &env);
+        fx.run_env(&["nas:../photos", "-s", "time", "--dry-run", "mpv", "*.png"], &photos, &env);
+    assert!(ok, "{err}");
+    assert_eq!(out, "mpv 001-ddd.png 002-eee.png");
+    let (out, err, ok) =
+        fx.run_env(&["nas:~/photos", "-s", "time", "--dry-run", "mpv", "*.png"], &fx.dir, &env);
     assert!(ok, "{err}");
     assert_eq!(out, "mpv 001-ddd.png 002-eee.png");
 
     let (out, _, _) = fx.run_env(&["list"], &fx.dir, &env);
-    assert!(out.contains("nas:/\t[mounted, 2 views]"), "{out}");
+    assert!(out.contains("nas:/\t[mounted, 3 views]"), "{out}");
 
     // Closing the last view of a host is what unmounts it.
     let (_, err, ok) = fx.run_env(&["close", "--all"], &fx.dir, &env);
