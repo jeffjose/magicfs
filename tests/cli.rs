@@ -976,7 +976,7 @@ fn sessions_are_listed_and_picked_by_number() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 4, "{out}");
     assert!(lines[0].starts_with("@0") && lines[0].contains("today"), "{out}");
-    assert!(lines[1].contains("yesterday") && lines[1].contains("15:00–15:20"), "{out}");
+    assert!(lines[1].contains("yesterday") && lines[1].contains("3:00pm – 3:20pm"), "{out}");
     assert!(lines[1].contains("2 files"), "{out}");
 
     let (out, _, ok) = fx.run(&["-s", "time", "-w", "@1", "--dry-run", "echo"], &fx.source);

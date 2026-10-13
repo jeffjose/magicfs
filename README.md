@@ -227,10 +227,10 @@ sessions` lists them, latest first:
 
 ```console
 $ magicfs sessions
-@0            today      10:02–11:40      18 files  1h38m
-@1            yesterday  15:10–17:45      31 files  2h35m
-@2            yesterday  09:00–11:55      40 files  2h55m
-@3            Tue 09-22  21:30             1 file
+@0            today        10:02am – 11:40am   18 files  1h38m
+@1            yesterday    3:10pm – 5:45pm     31 files  2h35m
+@2            yesterday    9:00am – 11:55am    40 files  2h55m
+@3            Tue, Sep 22  9:30pm               1 file
 $ magicfs -w @2 -s time feh *             # yesterday morning's, in order
 $ magicfs -w @0..@1 rm *                  # the last two, after asking
 ```

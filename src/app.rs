@@ -1159,20 +1159,25 @@ fn sessions(args: SpecArgs) -> Result<()> {
 
     let now = crate::when::now();
     let prefix = within.as_deref().filter(|w| !w.contains('@')).unwrap_or("");
+    let days: Vec<String> =
+        found.iter().take(shown).map(|s| crate::when::day_label(s.start, now)).collect();
+    let day_width = days.iter().map(|d| d.len()).max().unwrap_or(0) + 2;
+    let times: Vec<String> =
+        found.iter().take(shown).map(|s| crate::when::span_label(s.start, s.end)).collect();
+    let time_width = times.iter().map(|t| t.chars().count()).max().unwrap_or(0) + 1;
     for (i, s) in found.iter().enumerate().take(shown) {
         let n = s.members.len();
-        let (from, to) = (crate::when::clock_label(s.start), crate::when::clock_label(s.end));
         // A lone file (or a burst inside one minute) has no length to speak of.
-        let (times, length) = if from == to {
-            (from, String::new())
+        let length = if times[i].contains('–') {
+            crate::when::length_label(s.end - s.start)
         } else {
-            (format!("{from}–{to}"), crate::when::length_label(s.end - s.start))
+            String::new()
         };
         let line = format!(
-            "{:<14}{:<11}{:<13}{:>5} {:<5}  {length}",
+            "{:<14}{:<day_width$}{:<time_width$}{:>5} {:<5}  {length}",
             format!("{prefix}@{i}"),
-            crate::when::day_label(s.start, now),
-            times,
+            days[i],
+            times[i],
             n,
             if n == 1 { "file" } else { "files" },
         );

@@ -182,27 +182,36 @@ fn clause(text: &str, now: Secs) -> Result<Clause> {
     Ok(Clause::Span(start, end))
 }
 
-/// How a moment reads in a listing: `today`, `yesterday`, `Mon 09-21`, or a
-/// full date once it is more than a week back.
+/// How a moment reads in a listing: `today`, `yesterday`, `Mon, Sep 21`, and
+/// with the year once it is not this one.
 pub fn day_label(t: Secs, now: Secs) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
     let midnight = day_start(t, 0);
     let tm = local(t);
     if midnight == day_start(now, 0) {
-        "today".to_string()
-    } else if midnight == day_start(now, 1) {
-        "yesterday".to_string()
-    } else if midnight > day_start(now, 7) {
-        const NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        format!("{} {:02}-{:02}", NAMES[tm.tm_wday as usize], tm.tm_mon + 1, tm.tm_mday)
-    } else {
-        format!("{}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+        return "today".to_string();
     }
+    if midnight == day_start(now, 1) {
+        return "yesterday".to_string();
+    }
+    let day = format!("{}, {} {}", DAYS[tm.tm_wday as usize], MONTHS[tm.tm_mon as usize], tm.tm_mday);
+    if tm.tm_year == local(now).tm_year { day } else { format!("{day} {}", tm.tm_year + 1900) }
 }
 
-/// `14:05`, local time.
-pub fn clock_label(t: Secs) -> String {
-    let tm = local(t);
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+/// When a stretch ran, local time, the way you would say it:
+/// `12:00pm – 4:00pm`, or just `9:30pm` for one that began and ended in the
+/// same minute.
+pub fn span_label(start: Secs, end: Secs) -> String {
+    let clock = |t: Secs| {
+        let tm = local(t);
+        let hour = if tm.tm_hour % 12 == 0 { 12 } else { tm.tm_hour % 12 };
+        format!("{hour}:{:02}{}", tm.tm_min, if tm.tm_hour < 12 { "am" } else { "pm" })
+    };
+    let (from, to) = (clock(start), clock(end));
+    if from == to { from } else { format!("{from} – {to}") }
 }
 
 /// `1h08m`, `40m`, `3d`.
@@ -431,6 +440,27 @@ mod tests {
     fn when(t: Secs) -> (i32, i32, i32, i32) {
         let tm = local(t);
         (tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+    }
+
+    #[test]
+    fn a_day_is_named_the_way_you_would_say_it() {
+        let now = thursday_3pm();
+        let label = |mon, day| day_label(make(2026 - 1900, mon, day, 9, 0), now);
+        assert_eq!(label(8, 24), "today");
+        assert_eq!(label(8, 23), "yesterday");
+        assert_eq!(label(8, 22), "Tue, Sep 22");
+        assert_eq!(label(4, 5), "Tue, May 5");
+        assert_eq!(day_label(make(2025 - 1900, 11, 25, 9, 0), now), "Thu, Dec 25 2025");
+    }
+
+    #[test]
+    fn a_stretch_is_told_by_the_twelve_hour_clock() {
+        let at = |h, m| make(2026 - 1900, 8, 24, h, m);
+        assert_eq!(span_label(at(12, 0), at(16, 0)), "12:00pm – 4:00pm");
+        assert_eq!(span_label(at(9, 0), at(13, 15)), "9:00am – 1:15pm");
+        assert_eq!(span_label(at(0, 5), at(11, 59)), "12:05am – 11:59am");
+        assert_eq!(span_label(at(21, 30), at(21, 30)), "9:30pm");
+        assert_eq!(span_label(at(23, 30), at(25, 10)), "11:30pm – 1:10am");
     }
 
     #[test]
