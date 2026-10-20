@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::spec::{DirMode, SortKey, ViewSpec, fresh_seed};
 
@@ -63,8 +64,22 @@ argument list instead:
   magicfs paths -s time | feh -f -
 ";
 
+/// The version and the commit it was built from: `0.1.0-abc1234`, with
+/// `-dirty` if the tree had changes not committed.
+fn version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        // Unset where git could not be asked, or vergen's stand-in.
+        let Some(sha) = option_env!("VERGEN_GIT_SHA").filter(|sha| !sha.is_empty() && !sha.contains("VERGEN")) else {
+            return env!("CARGO_PKG_VERSION").to_string();
+        };
+        let dirty = if option_env!("VERGEN_GIT_DIRTY") == Some("true") { "-dirty" } else { "" };
+        format!("{}-{sha}{dirty}", env!("CARGO_PKG_VERSION"))
+    })
+}
+
 #[derive(Parser, Debug)]
-#[command(name = "magicfs", version, about = ABOUT, after_help = AFTER_HELP)]
+#[command(name = "magicfs", version = version(), about = ABOUT, after_help = AFTER_HELP)]
 // Not `args_conflicts_with_subcommands`: that would reject the global
 // --shell/--no-cd flags when they appear before a subcommand.
 #[command(subcommand_negates_reqs = true)]
