@@ -185,20 +185,17 @@ $ magicfs -s time *.jpg          # a view of the JPEGs alone, newest first
 
 ## By time
 
-`--latest` is the newest file and `--oldest` the oldest — `-s time -n 1`, and
-the same with `-r`. `-n` asks for more than one:
+`--latest` (or `--newest`) puts the newest first and `--oldest` the oldest —
+`-s time`, and the same with `-r`. By size there are `--largest` (or
+`--biggest`) and `--smallest`, and `-z/--random` (or `--shuffle`) is
+`-s random`. Each is also a word for `-s`: `-s oldest`. `-n` keeps the first
+few:
 
 ```console
-$ magicfs --latest feh *           # the screenshot you just took
+$ magicfs --latest -n 1 feh *      # the screenshot you just took
 $ magicfs --oldest -n 3 rm *       # the three oldest, after asking
+$ magicfs --largest -n 5 du -h *   # the five biggest
 ```
-
-`--newest` is another name for `--latest`, and by size there are `--largest`
-(or `--biggest`) and `--smallest`, the same way: `magicfs --largest -n 5 du -h *`.
-`-z/--random` (or `--shuffle`) is `-s random`, and picks nothing out.
-
-As `-s` words, `newest` (or `latest`), `oldest`, `largest` and `smallest`
-only order, and say which way: `magicfs -s oldest` is `-s time -r`.
 
 `-w/--when WINDOW` keeps only the files from a stretch of time, going by when
 each was last written. It works alongside everything else, so `*` means "the
@@ -357,7 +354,7 @@ is matched on the other side:
 ```console
 $ mfr nas:~/videos smplayer            # the whole directory, shuffled
 $ mfr nas:~/videos smplayer '*.mp4'    # just the mp4s
-$ magicfs nas:. --latest mpv           # the newest file in this directory, over there
+$ magicfs nas:. --latest -n 1 mpv      # the newest file in this directory, over there
 $ magicfs nas:/srv/renders -w lastweek rm '*'   # asks first, naming nas:/...
 ```
 

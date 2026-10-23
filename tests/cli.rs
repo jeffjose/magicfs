@@ -926,11 +926,11 @@ fn a_misspelt_file_is_named_back_with_what_it_probably_meant() {
 }
 
 #[test]
-fn latest_and_oldest_pick_by_time() {
+fn latest_and_oldest_order_by_time() {
     let fx = chronological_fixture("latest");
     let (out, _, ok) = fx.run(&["--latest", "--dry-run", "echo"], &fx.source);
     assert!(ok);
-    assert_eq!(out, "echo 001-aaa.jpg");
+    assert_eq!(out, "echo 001-aaa.jpg 002-bbb.jpg 003-ccc.jpg 004-ddd.png 005-eee.png");
     let (out, _, ok) = fx.run(&["--oldest", "-n", "2", "--dry-run", "echo"], &fx.source);
     assert!(ok);
     assert_eq!(out, "echo 001-eee.png 002-ddd.png");
@@ -1040,7 +1040,7 @@ fn an_alias_only_the_shell_understands_is_run_by_it() {
         return;
     }
     let fx = chronological_fixture("alias-shell");
-    let (out, _, ok) = with_aliases(&fx, &["--latest", "--dry-run", "shout"], ALIASES);
+    let (out, _, ok) = with_aliases(&fx, &["--latest", "-n", "1", "--dry-run", "shout"], ALIASES);
     assert!(ok);
     assert_eq!(out, "shout '001-aaa.jpg'");
 

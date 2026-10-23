@@ -422,19 +422,19 @@ pub struct SpecArgs {
     #[arg(long)]
     pub created: bool,
 
-    /// Newest first, and only the newest unless -n says how many.
+    /// Newest first: the same as `-s newest`.
     #[arg(long, visible_alias = "newest", group = "shortcut")]
     pub latest: bool,
 
-    /// Oldest first, and only the oldest unless -n says how many.
+    /// Oldest first: the same as `-s oldest`.
     #[arg(long, group = "shortcut")]
     pub oldest: bool,
 
-    /// Largest first, and only the largest unless -n says how many.
+    /// Largest first: the same as `-s largest`.
     #[arg(long, visible_alias = "biggest", group = "shortcut")]
     pub largest: bool,
 
-    /// Smallest first, and only the smallest unless -n says how many.
+    /// Smallest first: the same as `-s smallest`.
     #[arg(long, group = "shortcut")]
     pub smallest: bool,
 
@@ -496,14 +496,8 @@ impl SpecArgs {
     /// Only options the user actually typed take effect, so
     /// `magicfs filter png` on a time-sorted view keeps the time sort.
     pub fn apply_to(&self, spec: &mut ViewSpec) -> Result<()> {
-        // The shortcuts are a sort word, and all but --random a limit of one.
-        let sort = match (&self.sort, self.shortcut()) {
-            (Some(key), _) => Some(key.as_str()),
-            (None, Some(word)) => Some(word),
-            (None, None) => None,
-        };
-        let pick_one = self.shortcut().is_some_and(|word| word != "random");
-        if let Some(key) = sort {
+        // A shortcut is only its sort word: `--oldest` is `-s oldest`.
+        if let Some(key) = self.sort.as_deref().or(self.shortcut()) {
             let (key, against) = SortKey::parse_ordering(key)?;
             // A fresh `--sort` also resets direction, so switching sort keys
             // doesn't silently inherit a reverse from a previous command.
@@ -529,8 +523,6 @@ impl SpecArgs {
         }
         if let Some(n) = self.limit {
             spec.limit = Some(n);
-        } else if pick_one {
-            spec.limit = Some(1);
         }
         if self.unseen {
             spec.unseen = true;
@@ -712,40 +704,29 @@ mod tests {
     }
 
     #[test]
-    fn latest_and_oldest_are_a_time_sort_and_a_limit() {
-        let spec = SpecArgs { latest: true, ..Default::default() }.to_spec().unwrap();
-        assert_eq!((spec.sort, spec.descending(), spec.limit), (SortKey::Time, true, Some(1)));
-
-        let spec = SpecArgs { oldest: true, limit: Some(3), ..Default::default() }
-            .to_spec()
-            .unwrap();
-        assert_eq!((spec.sort, spec.descending(), spec.limit), (SortKey::Time, false, Some(3)));
-
-        assert!(Cli::try_parse_from(["magicfs", "--latest", "--oldest"]).is_err());
-        assert!(Cli::try_parse_from(["magicfs", "--latest", "-s", "name"]).is_err());
-    }
-
-    #[test]
-    fn the_other_shortcuts_are_their_sort_words() {
+    fn the_shortcuts_are_their_sort_words_and_keep_every_file() {
         let spec = |argv: &[&str]| parse_from(argv).0.spec.to_spec().unwrap();
 
+        let s = spec(&["magicfs", "--latest"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, true, None));
         let s = spec(&["magicfs", "--newest"]);
-        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, true, Some(1)));
-        let s = spec(&["magicfs", "--biggest", "-n", "5"]);
-        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, true, Some(5)));
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, true, None));
+        let s = spec(&["magicfs", "--oldest", "-n", "3"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, false, Some(3)));
+        let s = spec(&["magicfs", "--biggest"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, true, None));
         let s = spec(&["magicfs", "--smallest"]);
-        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, false, Some(1)));
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, false, None));
         let s = spec(&["magicfs", "--oldest", "-r"]);
         assert_eq!((s.sort, s.descending()), (SortKey::Time, true), "-r flips it back");
-
-        // --random shuffles everything: it picks nothing out.
         let s = spec(&["magicfs", "-z"]);
         assert_eq!((s.sort, s.limit), (SortKey::Random, None));
 
-        // As sort words they only order, and say which way.
         let s = spec(&["magicfs", "-s", "oldest"]);
         assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, false, None));
 
+        assert!(Cli::try_parse_from(["magicfs", "--latest", "--oldest"]).is_err());
+        assert!(Cli::try_parse_from(["magicfs", "--latest", "-s", "name"]).is_err());
         assert!(Cli::try_parse_from(["magicfs", "--largest", "--shuffle"]).is_err());
         assert!(Cli::try_parse_from(["magicfs", "-z", "-s", "time"]).is_err());
     }
