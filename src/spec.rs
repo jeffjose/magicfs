@@ -51,8 +51,22 @@ impl SortKey {
             "random" | "rand" | "shuffle" | "r" => SortKey::Random,
             other => bail!(
                 "unknown sort key `{other}`\n\
-                 valid keys: name, natural, time, created, ctime, atime, size, ext, random"
+                 valid keys: name, natural, time, created, ctime, atime, size, ext, random;\n\
+                 or newest (latest), oldest, largest, smallest"
             ),
+        })
+    }
+
+    /// A key, or a word that also says which way it runs: `newest` is
+    /// `time`, `oldest` is `time` reversed. The flag is whether it runs
+    /// against the key's usual direction.
+    pub fn parse_ordering(s: &str) -> Result<(Self, bool)> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "newest" | "latest" => (SortKey::Time, false),
+            "oldest" => (SortKey::Time, true),
+            "largest" | "biggest" => (SortKey::Size, false),
+            "smallest" => (SortKey::Size, true),
+            other => (SortKey::parse(other)?, false),
         })
     }
 
@@ -258,6 +272,9 @@ mod tests {
         assert_eq!(SortKey::parse("mtime").unwrap(), SortKey::Time);
         assert_eq!(SortKey::parse("SHUFFLE").unwrap(), SortKey::Random);
         assert!(SortKey::parse("sideways").is_err());
+        assert_eq!(SortKey::parse_ordering("Oldest").unwrap(), (SortKey::Time, true));
+        assert_eq!(SortKey::parse_ordering("largest").unwrap(), (SortKey::Size, false));
+        assert_eq!(SortKey::parse_ordering("name").unwrap(), (SortKey::Name, false));
     }
 
     #[test]

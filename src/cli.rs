@@ -283,7 +283,8 @@ impl Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Reorder the current view: name, natural, time, created, ctime, atime, size, ext, random.
+    /// Reorder the current view: name, natural, time, created, ctime, atime, size, ext, random;
+    /// or newest, oldest, largest, smallest.
     Sort {
         key: String,
         #[arg(short, long)]
@@ -384,8 +385,15 @@ pub enum Command {
 /// Ordering/filtering options, shared by the root command and by `exec`/`paths`.
 #[derive(Args, Clone, Debug, Default)]
 pub struct SpecArgs {
-    /// Ordering: name, natural, time, created, ctime, atime, size, ext, random.
-    #[arg(short = 's', long, value_name = "KEY")]
+    /// Ordering: name, natural, time, created, ctime, atime, size, ext, random;
+    /// or newest (latest), oldest, largest, smallest, which say which way too.
+    // Each named, not the group, so the error names the one that was given.
+    #[arg(
+        short = 's',
+        long,
+        value_name = "KEY",
+        conflicts_with_all = ["latest", "oldest", "largest", "smallest", "random"]
+    )]
     pub sort: Option<String>,
 
     /// Reverse the ordering.
@@ -415,12 +423,24 @@ pub struct SpecArgs {
     pub created: bool,
 
     /// Newest first, and only the newest unless -n says how many.
-    #[arg(long, conflicts_with_all = ["sort", "oldest"])]
+    #[arg(long, visible_alias = "newest", group = "shortcut")]
     pub latest: bool,
 
     /// Oldest first, and only the oldest unless -n says how many.
-    #[arg(long, conflicts_with = "sort")]
+    #[arg(long, group = "shortcut")]
     pub oldest: bool,
+
+    /// Largest first, and only the largest unless -n says how many.
+    #[arg(long, visible_alias = "biggest", group = "shortcut")]
+    pub largest: bool,
+
+    /// Smallest first, and only the smallest unless -n says how many.
+    #[arg(long, group = "shortcut")]
+    pub smallest: bool,
+
+    /// Shuffled: the same as `-s random`.
+    #[arg(short = 'z', long, visible_alias = "shuffle", group = "shortcut")]
+    pub random: bool,
 
     /// Only files no command has been handed yet; a command marks what it gets.
     #[arg(short = 'u', long)]
@@ -461,6 +481,9 @@ impl SpecArgs {
             && !self.created
             && !self.latest
             && !self.oldest
+            && !self.largest
+            && !self.smallest
+            && !self.random
             && !self.recursive
             && self.dirs.is_none()
             && self.name_format.is_none()
@@ -473,11 +496,19 @@ impl SpecArgs {
     /// Only options the user actually typed take effect, so
     /// `magicfs filter png` on a time-sorted view keeps the time sort.
     pub fn apply_to(&self, spec: &mut ViewSpec) -> Result<()> {
-        if let Some(key) = &self.sort {
-            let key = SortKey::parse(key)?;
+        // The shortcuts are a sort word, and all but --random a limit of one.
+        let sort = match (&self.sort, self.shortcut()) {
+            (Some(key), _) => Some(key.as_str()),
+            (None, Some(word)) => Some(word),
+            (None, None) => None,
+        };
+        let pick_one = self.shortcut().is_some_and(|word| word != "random");
+        if let Some(key) = sort {
+            let (key, against) = SortKey::parse_ordering(key)?;
             // A fresh `--sort` also resets direction, so switching sort keys
             // doesn't silently inherit a reverse from a previous command.
-            spec.reverse = self.reverse;
+            // `-r` on top of `oldest` flips it back, as it would `-s time`.
+            spec.reverse = against != self.reverse;
             // Asking for random again means "shuffle again" — that is the only
             // thing a second `-s random` could usefully mean. Everything else
             // that rebuilds a view (`refresh`, `filter`, ...) keeps the seed,
@@ -486,10 +517,6 @@ impl SpecArgs {
                 spec.seed = fresh_seed();
             }
             spec.sort = key;
-        } else if self.latest || self.oldest {
-            // `-r` on top flips it, as it would `-s time`.
-            spec.sort = SortKey::Time;
-            spec.reverse = self.oldest != self.reverse;
         } else if self.reverse {
             spec.reverse = true;
         }
@@ -502,7 +529,7 @@ impl SpecArgs {
         }
         if let Some(n) = self.limit {
             spec.limit = Some(n);
-        } else if self.latest || self.oldest {
+        } else if pick_one {
             spec.limit = Some(1);
         }
         if self.unseen {
@@ -537,6 +564,19 @@ impl SpecArgs {
             spec.case_sensitive = true;
         }
         Ok(())
+    }
+
+    /// The sort word a shortcut flag stands for: `--oldest` is `-s oldest`.
+    fn shortcut(&self) -> Option<&'static str> {
+        [
+            (self.latest, "newest"),
+            (self.oldest, "oldest"),
+            (self.largest, "largest"),
+            (self.smallest, "smallest"),
+            (self.random, "random"),
+        ]
+        .into_iter()
+        .find_map(|(on, word)| on.then_some(word))
     }
 
     /// Build a spec from scratch with these options applied.
@@ -683,6 +723,31 @@ mod tests {
 
         assert!(Cli::try_parse_from(["magicfs", "--latest", "--oldest"]).is_err());
         assert!(Cli::try_parse_from(["magicfs", "--latest", "-s", "name"]).is_err());
+    }
+
+    #[test]
+    fn the_other_shortcuts_are_their_sort_words() {
+        let spec = |argv: &[&str]| parse_from(argv).0.spec.to_spec().unwrap();
+
+        let s = spec(&["magicfs", "--newest"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, true, Some(1)));
+        let s = spec(&["magicfs", "--biggest", "-n", "5"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, true, Some(5)));
+        let s = spec(&["magicfs", "--smallest"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Size, false, Some(1)));
+        let s = spec(&["magicfs", "--oldest", "-r"]);
+        assert_eq!((s.sort, s.descending()), (SortKey::Time, true), "-r flips it back");
+
+        // --random shuffles everything: it picks nothing out.
+        let s = spec(&["magicfs", "-z"]);
+        assert_eq!((s.sort, s.limit), (SortKey::Random, None));
+
+        // As sort words they only order, and say which way.
+        let s = spec(&["magicfs", "-s", "oldest"]);
+        assert_eq!((s.sort, s.descending(), s.limit), (SortKey::Time, false, None));
+
+        assert!(Cli::try_parse_from(["magicfs", "--largest", "--shuffle"]).is_err());
+        assert!(Cli::try_parse_from(["magicfs", "-z", "-s", "time"]).is_err());
     }
 
     #[test]

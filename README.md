@@ -193,6 +193,13 @@ $ magicfs --latest feh *           # the screenshot you just took
 $ magicfs --oldest -n 3 rm *       # the three oldest, after asking
 ```
 
+`--newest` is another name for `--latest`, and by size there are `--largest`
+(or `--biggest`) and `--smallest`, the same way: `magicfs --largest -n 5 du -h *`.
+`-z/--random` (or `--shuffle`) is `-s random`, and picks nothing out.
+
+As `-s` words, `newest` (or `latest`), `oldest`, `largest` and `smallest`
+only order, and say which way: `magicfs -s oldest` is `-s time -r`.
+
 `-w/--when WINDOW` keeps only the files from a stretch of time, going by when
 each was last written. It works alongside everything else, so `*` means "the
 files from then":
@@ -462,7 +469,8 @@ every view of that directory. `magicfs clean --yes` removes the lot.
 ### Options
 
 `-s/--sort` `-r/--reverse` `-f/--filter` `-x/--exclude` `-n/--limit` `-u/--unseen`
-`-w/--when` `--created` `--latest` `--oldest`
+`-w/--when` `--created` `--latest/--newest` `--oldest` `--largest/--biggest`
+`--smallest` `-z/--random/--shuffle`
 `-R/--recursive` `--dirs include|exclude|only` `--name-format` `--pad`
 `--case-sensitive` `--out` `--new` `--no-cd` `--shell` `--dry-run` `--real`
 `--links` `-y/--yes` `--update`
